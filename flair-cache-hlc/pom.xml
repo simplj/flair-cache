@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-hlc</artifactId>
+    <name>FlairCache — Hybrid Logical Clock</name>
+    <description>
+        Zero-dependency Hybrid Logical Clock (HLC) for causal timestamps and Last-Write-Wins conflict
+        resolution in distributed systems. Combines physical wall-clock time with a logical counter to
+        produce monotonically increasing timestamps that remain consistent despite NTP drift or clock skew.
+        Usable standalone in any distributed Java system that needs causally consistent timestamps.
+    </description>
+
+    <!-- Standalone module: zero FLAIR dependencies -->
+</project>
