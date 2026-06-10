@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-serial</artifactId>
+    <name>FlairCache — Binary Serialization</name>
+    <description>
+        Fast zero-dependency binary serialization for FlairCache — hand-rolled POJO ↔ ByteBuffer
+        encoding with no reflection and no external libraries. Usable standalone in any Java project
+        that needs compact, efficient binary serialization without third-party dependencies.
+    </description>
+
+    <!-- Standalone module: zero FLAIR dependencies -->
+</project>
