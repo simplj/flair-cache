@@ -19,8 +19,9 @@ import java.util.UUID;
  *   <li><b>Any registered type — ByteBuffer</b> — {@link #serialize(Class, Object, ByteBuffer)},
  *       {@link #deserialize(Class, ByteBuffer)}, and {@link #sizeOf(Class, Object)} for
  *       composing mixed-type frames without allocation.</li>
- *   <li><b>Any registered type — byte[]</b> — {@link #encode(Class, Object)} and
- *       {@link #decode(Class, byte[])} for standalone payloads and testing.</li>
+ *   <li><b>Any registered type — byte[] / ByteBuffer</b> — {@link #encode(Class, Object)},
+ *       {@link #encodeToBuffer(Class, Object)}, and {@link #decode(Class, byte[])} for
+ *       standalone payloads and testing.</li>
  * </ol>
  *
  * <p>Obtain an instance via {@link #standard()}, which pre-registers codecs for all built-in
@@ -149,12 +150,27 @@ public final class Codecs {
     /**
      * Encodes {@code obj} to a freshly allocated byte array using the codec registered
      * for {@code type}.
+     *
+     * <p>Note: {@link ByteBuffer#allocate} backs the buffer with a single {@code byte[]}
+     * and {@link ByteBuffer#array()} returns that same backing array — no copy is made.
      */
     public <T> byte[] encode(Class<T> type, T obj) {
+        return encodeToBuffer(type, obj).array();
+    }
+
+    /**
+     * Encodes {@code obj} to a freshly allocated, ready-to-read {@link ByteBuffer}
+     * (position=0, limit=encoded length) using the codec registered for {@code type}.
+     *
+     * <p>Use this when the caller needs a {@code ByteBuffer} directly — e.g. to feed
+     * into another buffer operation — without an intermediate {@code byte[]} copy.
+     */
+    public <T> ByteBuffer encodeToBuffer(Class<T> type, T obj) {
         Codec<T> c = lookup(type);
         ByteBuffer buf = ByteBuffer.allocate(c.sizeOf(obj));
         c.serialize(obj, buf);
-        return buf.array();
+        buf.flip();
+        return buf;
     }
 
     /** Decodes a value of {@code type} from {@code bytes}. */

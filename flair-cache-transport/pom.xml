@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-transport</artifactId>
+    <name>FlairCache — NIO TCP Transport</name>
+    <description>
+        Zero-dependency non-blocking NIO TCP server and client for FlairCache. Operates on raw byte[]
+        only — callers are responsible for encoding and decoding. Usable standalone in any Java project
+        that needs a high-performance, zero-infra TCP transport layer built on Java NIO.
+    </description>
+
+    <!-- Standalone module: zero FLAIR dependencies.                         -->
+    <!-- Transport deals in raw byte[] — frame encoding lives in replication. -->
+</project>

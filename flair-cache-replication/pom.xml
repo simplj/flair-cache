@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-replication</artifactId>
+    <name>FlairCache — Replication</name>
+    <description>
+        Multi-node TCP data propagation with ACK tracking and configurable consistency modes
+        (EVENTUAL, QUORUM, STRONG). Contains the frame encoder/decoder and the replication fanout
+        coordinator. Compositional module — depends on serial, transport, gossip, hlc, and store.
+        Independently useful in any distributed system needing reliable TCP data propagation.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-serial</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-gossip</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-hlc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-store</artifactId>
+        </dependency>
+    </dependencies>
+</project>

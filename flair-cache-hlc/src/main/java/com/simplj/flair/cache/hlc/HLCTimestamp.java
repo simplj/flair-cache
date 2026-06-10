@@ -38,9 +38,7 @@ public record HLCTimestamp(long logical, long counter) implements Comparable<HLC
     }
 
     public byte[] encodeToBytes() {
-        byte[] b = new byte[BYTES];
-        encode(ByteBuffer.wrap(b));
-        return b;
+        return encode().array();
     }
 
     public static HLCTimestamp decode(ByteBuffer buf) {
