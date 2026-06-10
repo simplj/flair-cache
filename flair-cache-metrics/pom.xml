@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-metrics</artifactId>
+    <name>FlairCache — JMX Metrics</name>
+    <description>
+        JMX metrics registry wired to all FlairCache internals. Exposes CacheMetrics (hit/miss rate),
+        ReplicationMetrics (lag, pending/dropped frames), ClusterMetrics (alive/suspected nodes), and
+        EvictionMetrics (evicted/expired entries) under the com.simplj.flair.cache MBean domain.
+        Compositional module — depends on all other FlairCache modules.
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-serial</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-gossip</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-hlc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-store</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-replication</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-bootstrap</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-dsl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache-watch</artifactId>
+        </dependency>
+    </dependencies>
+</project>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-watch</artifactId>
+    <name>FlairCache — Watch / Reactivity</name>
+    <description>
+        Typed in-process pub/sub engine for subscribing to data change events (PUT, DELETE, EXPIRE).
+        WatchRegistry is a standalone event bus — it has no dependency on the FlairCache store.
+        CacheBlock wires it in at a higher layer. Usable standalone in any Java project that needs
+        typed, key-filtered, asynchronous in-process event notification.
+    </description>
+
+    <!-- Standalone module: zero FLAIR dependencies.                            -->
+    <!-- WatchRegistry is a generic pub/sub engine — it does NOT import store. -->
+</project>

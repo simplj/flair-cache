@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-gossip</artifactId>
+    <name>FlairCache — SWIM Gossip</name>
+    <description>
+        Zero-dependency SWIM gossip protocol for peer discovery and failure detection over UDP.
+        Gossip is independent of TCP transport — it uses DatagramSocket, not SocketChannel.
+        Usable standalone in any distributed Java system that needs zero-config cluster membership.
+    </description>
+
+    <!-- Standalone module: zero FLAIR dependencies.                 -->
+    <!-- Gossip uses UDP (DatagramSocket) — no dependency on transport (TCP). -->
+</project>
