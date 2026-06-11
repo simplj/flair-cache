@@ -98,7 +98,7 @@ FLAIR is built as composable standalone modules. Each module is independently us
 | Module | Artifact | Standalone purpose |
 |---|---|---|
 | [Serial](flair-cache-serial/README.md) | `flair-cache-serial` | Binary serialization — POJOs ↔ `ByteBuffer`, zero deps |
-| Transport | `flair-cache-transport` | Non-blocking NIO TCP server + client |
+| [Transport](flair-cache-transport/README.md) | `flair-cache-transport` | Non-blocking NIO TCP server + client |
 | Gossip | `flair-cache-gossip` | SWIM peer discovery + failure detection (UDP) |
 | [HLC](flair-cache-hlc/README.md) | `flair-cache-hlc` | Hybrid Logical Clock — causal timestamps for distributed systems |
 | Store | `flair-cache-store` | Local in-memory cache — TTL, LRU/LFU eviction |
@@ -260,7 +260,7 @@ FLAIR is currently in active development. The library is being built module by m
 - [x] Architecture design & module specification
 - [x] [`flair-cache-serial`](flair-cache-serial/README.md) — Binary serialization
 - [x] [`flair-cache-hlc`](flair-cache-hlc/README.md) — Hybrid Logical Clock
-- [ ] `flair-cache-transport` — NIO TCP transport
+- [x] [`flair-cache-transport`](flair-cache-transport/README.md) — NIO TCP transport
 - [ ] `flair-cache-gossip` — SWIM gossip
 - [ ] `flair-cache-store` — Local store
 - [ ] `flair-cache-replication` — Replication engine
