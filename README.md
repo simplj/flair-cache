@@ -99,9 +99,9 @@ FLAIR is built as composable standalone modules. Each module is independently us
 |---|---|---|
 | [Serial](flair-cache-serial/README.md) | `flair-cache-serial` | Binary serialization — POJOs ↔ `ByteBuffer`, zero deps |
 | [Transport](flair-cache-transport/README.md) | `flair-cache-transport` | Non-blocking NIO TCP server + client |
-| Gossip | `flair-cache-gossip` | SWIM peer discovery + failure detection (UDP) |
+| [Gossip](flair-cache-gossip/README.md) | `flair-cache-gossip` | SWIM peer discovery + failure detection (UDP) |
 | [HLC](flair-cache-hlc/README.md) | `flair-cache-hlc` | Hybrid Logical Clock — causal timestamps for distributed systems |
-| Store | `flair-cache-store` | Local in-memory cache — TTL, LRU/LFU eviction |
+| [Store](flair-cache-store/README.md) | `flair-cache-store` | Local in-memory cache — TTL, LRU/LFU eviction |
 | Replication | `flair-cache-replication` | TCP fanout, ACK tracking, consistency modes |
 | Bootstrap | `flair-cache-bootstrap` | State sync for new node join |
 | DSL | `flair-cache-dsl` | Query DSL — filter, join, aggregate over cache blocks |
@@ -261,8 +261,8 @@ FLAIR is currently in active development. The library is being built module by m
 - [x] [`flair-cache-serial`](flair-cache-serial/README.md) — Binary serialization
 - [x] [`flair-cache-hlc`](flair-cache-hlc/README.md) — Hybrid Logical Clock
 - [x] [`flair-cache-transport`](flair-cache-transport/README.md) — NIO TCP transport
-- [ ] `flair-cache-gossip` — SWIM gossip
-- [ ] `flair-cache-store` — Local store
+- [x] [`flair-cache-gossip`](flair-cache-gossip/README.md) — SWIM gossip
+- [x] [`flair-cache-store`](flair-cache-store/README.md) — Local store
 - [ ] `flair-cache-replication` — Replication engine
 - [ ] `flair-cache-bootstrap` — Bootstrap sync
 - [ ] `flair-cache-dsl` — Query DSL
