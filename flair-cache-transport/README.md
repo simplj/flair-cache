@@ -84,9 +84,9 @@ server.start();
 Every frame on the wire is prefixed with an 8-byte big-endian header:
 
 ```
-┌─ MAGIC(2) ─┬─ VER(1) ─┬─ TYPE(1) ─┬─ LEN(4) ─┬─ PAYLOAD(LEN bytes) ─┐
-│  0xCA 0xFE │  0x01    │ app-defined│ uint32   │ raw bytes             │
-└────────────┴──────────┴───────────┴──────────┴───────────────────────┘
+┌─ MAGIC(2) ─┬─ VER(1) ─┬─ TYPE(1) ───┬─ LEN(4) ─┬─ PAYLOAD(LEN bytes) ──┐
+│  0xCA 0xFE │  0x01    │ app-defined │ uint32   │ raw bytes             │
+└────────────┴──────────┴─────────────┴──────────┴───────────────────────┘
 ```
 
 | Field | Size | Description |
