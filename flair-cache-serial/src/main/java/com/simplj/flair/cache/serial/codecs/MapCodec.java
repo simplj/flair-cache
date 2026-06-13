@@ -39,9 +39,13 @@ public final class MapCodec<K, V> implements Codec<Map<K, V>> {
         return size;
     }
 
+    private static final int MAX_ENTRIES = 10_000_000;
+
     @Override
     public Map<K, V> deserialize(ByteBuffer buf) {
         int count = buf.getInt();
+        if (count < 0 || count > MAX_ENTRIES)
+            throw new IllegalArgumentException("Map entry count out of range: " + count);
         Map<K, V> map = new HashMap<>(count * 4 / 3 + 1);
         for (int i = 0; i < count; i++) {
             K key = keyCodec.deserialize(buf);

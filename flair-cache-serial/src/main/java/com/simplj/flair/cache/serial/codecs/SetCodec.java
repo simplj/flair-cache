@@ -39,9 +39,13 @@ public final class SetCodec<E> implements Codec<Set<E>> {
         return size;
     }
 
+    private static final int MAX_ELEMENTS = 10_000_000;
+
     @Override
     public Set<E> deserialize(ByteBuffer buf) {
         int count = buf.getInt();
+        if (count < 0 || count > MAX_ELEMENTS)
+            throw new IllegalArgumentException("Set element count out of range: " + count);
         if (count == 0) return new LinkedHashSet<>();
         LinkedHashSet<E> result = new LinkedHashSet<>(count * 4 / 3 + 1);
         for (int i = 0; i < count; i++) result.add(elementCodec.deserialize(buf));

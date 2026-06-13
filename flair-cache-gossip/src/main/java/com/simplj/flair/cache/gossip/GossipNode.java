@@ -524,9 +524,9 @@ public final class GossipNode {
 
     private void trySendJoin(String seed) {
         try {
-            String[]    parts = seed.split(":");
-            InetAddress addr  = InetAddress.getByName(parts[0]);
-            int         port  = Integer.parseInt(parts[1]);
+            int         colon = seed.lastIndexOf(':');
+            InetAddress addr  = InetAddress.getByName(seed.substring(0, colon));
+            int         port  = Integer.parseInt(seed.substring(colon + 1));
             sendTo(GossipMessage.join(nodeId, incarnation.current()), addr, port);
         } catch (Exception e) {
             log.log(Level.WARNING, "JOIN failed to seed " + seed, e);

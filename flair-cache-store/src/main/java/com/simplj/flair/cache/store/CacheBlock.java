@@ -126,6 +126,23 @@ public final class CacheBlock<K, V> implements AutoCloseable {
     }
 
     /**
+     * Returns a point-in-time copy of all non-expired entries as raw byte arrays.
+     * Intended for the bootstrap layer to stream the store contents over the wire.
+     * Safe under concurrent writes — no ConcurrentModificationException.
+     */
+    public Map<byte[], CacheEntry> rawSnapshotEntries() {
+        Map<ByteArrayKey, CacheEntry> raw = store.rawSnapshot();
+        long now = System.currentTimeMillis();
+        Map<byte[], CacheEntry> result = new HashMap<>(raw.size());
+        for (Map.Entry<ByteArrayKey, CacheEntry> e : raw.entrySet()) {
+            if (!e.getValue().isExpired(now)) {
+                result.put(e.getKey().data, e.getValue());
+            }
+        }
+        return result;
+    }
+
+    /**
      * Returns a point-in-time copy of all non-expired entries.
      * Safe under concurrent writes — no ConcurrentModificationException.
      */
@@ -158,6 +175,16 @@ public final class CacheBlock<K, V> implements AutoCloseable {
     public CacheEntry getRaw(byte[] key) {
         Objects.requireNonNull(key, "key must not be null");
         return store.getRaw(key);
+    }
+
+    public void deleteRaw(byte[] key) {
+        Objects.requireNonNull(key, "key must not be null");
+        store.delete(new ByteArrayKey(key));
+    }
+
+    public void updateClock(com.simplj.flair.cache.hlc.HLCTimestamp remote) {
+        Objects.requireNonNull(remote, "remote must not be null");
+        store.updateClock(remote);
     }
 
     // ── Listener registration (for replication and watch layers) ────────────

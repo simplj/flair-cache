@@ -102,8 +102,8 @@ FLAIR is built as composable standalone modules. Each module is independently us
 | [Gossip](flair-cache-gossip/README.md) | `flair-cache-gossip` | SWIM peer discovery + failure detection (UDP) |
 | [HLC](flair-cache-hlc/README.md) | `flair-cache-hlc` | Hybrid Logical Clock — causal timestamps for distributed systems |
 | [Store](flair-cache-store/README.md) | `flair-cache-store` | Local in-memory cache — TTL, LRU/LFU eviction |
-| Replication | `flair-cache-replication` | TCP fanout, ACK tracking, consistency modes |
-| Bootstrap | `flair-cache-bootstrap` | State sync for new node join |
+| [Replication](flair-cache-replication/README.md) | `flair-cache-replication` | TCP fanout, ACK tracking, consistency modes |
+| [Bootstrap](flair-cache-bootstrap/README.md) | `flair-cache-bootstrap` | State sync for new node join |
 | DSL | `flair-cache-dsl` | Query DSL — filter, join, aggregate over cache blocks |
 | Watch | `flair-cache-watch` | Reactivity — subscribe to cache change events |
 | Metrics | `flair-cache-metrics` | JMX metrics and monitoring |
@@ -263,14 +263,54 @@ FLAIR is currently in active development. The library is being built module by m
 - [x] [`flair-cache-transport`](flair-cache-transport/README.md) — NIO TCP transport
 - [x] [`flair-cache-gossip`](flair-cache-gossip/README.md) — SWIM gossip
 - [x] [`flair-cache-store`](flair-cache-store/README.md) — Local store
-- [ ] `flair-cache-replication` — Replication engine
-- [ ] `flair-cache-bootstrap` — Bootstrap sync
+- [x] [`flair-cache-replication`](flair-cache-replication/README.md) — Replication engine
+- [x] [`flair-cache-bootstrap`](flair-cache-bootstrap/README.md) — Bootstrap sync
 - [ ] `flair-cache-dsl` — Query DSL
 - [ ] `flair-cache-watch` — Watch / reactivity
 - [ ] `flair-cache-metrics` — JMX metrics
 - [ ] First stable release on Maven Central
 
 Watch / star the repository to be notified of the first release.
+
+---
+
+## Known Limitations
+
+These are known V1 limitations. Each is a tracked enhancement for V2.
+
+**Delete conflict resolution is unconditional**
+`DELETE` operations do not participate in HLC-based Last-Write-Wins ordering. A `DELETE` always wins when it is applied, regardless of whether a concurrent `PUT` carries a higher HLC timestamp. Applications that issue concurrent writes and deletes to the same key may see unexpected data loss under network partition or message reordering. Tombstone-based LWW for deletes is planned for V2.
+
+**Replication queue capacity is fixed**
+The per-node replication queue is fixed at 65,536 frames and is not tunable via configuration in V1. Under sustained high-burst write workloads that exhaust this limit:
+- `EVENTUAL` mode: the frame is dropped and a `WARNING` is logged — no exception.
+- `QUORUM` / `STRONG` mode: the caller immediately receives a `ReplicationTimeoutException`.
+
+Configurable queue capacity via `FlairCacheConfig` is planned for V2.
+
+**No persistence**
+FLAIR is a pure in-memory store. A node that restarts loses its local data and must receive a full state transfer from a live peer via the bootstrap sync process before serving consistent reads. Snapshot-to-disk and point-in-time recovery are planned for V2.
+
+**Bootstrap has no concurrency limit for simultaneous joins**
+When multiple nodes join the cluster at the same time, the donor spawns one dedicated `flaircache-bootstrap-sync` thread per joiner with no upper bound. Each thread holds a full point-in-time snapshot in memory for the duration of the transfer. Joining 20+ nodes simultaneously will create 20+ threads and proportionally high heap pressure on the donor. Rolling joins — bringing nodes up one or a few at a time — are strongly recommended in V1. A semaphore-backed sync pool with a configurable concurrency cap is planned for V2.
+
+---
+
+## V2 Roadmap
+
+| Enhancement | Description |
+|---|---|
+| Tombstone deletes | DELETE participates in HLC LWW — concurrent deletes and writes resolve correctly |
+| Configurable queue capacity | Replication queue size tunable via `FlairCacheConfig` |
+| Bounded bootstrap concurrency | Cap concurrent join syncs on the donor via a configurable semaphore-backed pool; shed excess with a clear error |
+| Snapshot / recovery | Persist state to disk; restore on restart without full peer sync |
+| CRDT merge strategies | Pluggable conflict resolution beyond LWW (G-Counter, PN-Counter, OR-Set) |
+| Derived / computed blocks | Read-only blocks whose values are functions of other blocks |
+| DSL index engine | Accelerated queries with in-memory secondary indexes |
+| Reactive streaming | `Flow.Publisher` integration for reactive consumers |
+| Write-through / write-behind | Propagate writes to an external store (database, file) |
+| Topology-aware replication | Rack / zone awareness to reduce cross-AZ replication traffic |
+| Per-block ACLs | Fine-grained read/write access control per cache block |
 
 ---
 

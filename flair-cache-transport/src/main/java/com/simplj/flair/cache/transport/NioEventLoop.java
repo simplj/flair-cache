@@ -11,15 +11,19 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-final class NioEventLoop implements Runnable {
+public final class NioEventLoop implements Runnable {
 
     private static final Logger log = Logger.getLogger(NioEventLoop.class.getName());
     private static final long SELECT_TIMEOUT_MS = 50;
+    // Global counter so every NioEventLoop instance gets a unique thread name —
+    // critical for distinguishing selector threads in thread dumps when selectorThreads > 1.
+    private static final AtomicInteger INSTANCE_COUNTER = new AtomicInteger();
     // Empty source buffer for SSLEngine.wrap() during TLS handshake — handshake records are
     // produced from the engine's internal state, not from application data.
     // Instance field (not static) so that two NioEventLoop instances on different selector threads
@@ -48,6 +52,11 @@ final class NioEventLoop implements Runnable {
     // Server-side accept listener (TcpServer.onConnect). Never used for client connects.
     private volatile Consumer<Connection> acceptListener;
 
+    // When non-null, accepted SocketChannels are handed to this consumer instead of being
+    // registered with this loop's selector. Used by TcpServer to distribute incoming
+    // connections across a pool of event loops (selectorThreads > 1).
+    private volatile Consumer<SocketChannel> acceptHandoff;
+
     private volatile boolean running = true;
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final Thread thread;
@@ -69,7 +78,8 @@ final class NioEventLoop implements Runnable {
         this.backpressurePolicy = backpressurePolicy;
         this.queueCapacity = queueCapacity;
         this.serverTlsConfig = serverTlsConfig;
-        this.thread = new FlairCacheThreadFactory("flaircache-nio-selector").newThread(this);
+        this.thread = new FlairCacheThreadFactory(
+                "flaircache-nio-selector-" + INSTANCE_COUNTER.getAndIncrement()).newThread(this);
 
         int poolSize = Math.max(1, workerThreads);
         this.workerPool = Executors.newFixedThreadPool(
@@ -139,6 +149,29 @@ final class NioEventLoop implements Runnable {
         this.acceptListener = listener;
     }
 
+    /**
+     * When set, accepted raw channels are forwarded to this consumer instead of being
+     * registered with this loop. TcpServer uses this to distribute accepted connections
+     * across a pool of worker loops (see {@code selectorThreads}).
+     */
+    void setAcceptHandoff(Consumer<SocketChannel> handoff) {
+        this.acceptHandoff = handoff;
+    }
+
+    /**
+     * Queues a server-accepted channel for registration with this event loop. Called by a
+     * sibling accept loop when distributing incoming connections across the pool.
+     * Uses this loop's {@code serverTlsConfig} since all loops in a pool share the same config.
+     */
+    void registerAcceptedChannel(SocketChannel sc) {
+        pendingConnects.offer(new PendingConnect(sc, serverTlsConfig, true, null));
+        try {
+            selector.wakeup();
+        } catch (ClosedSelectorException e) {
+            try { sc.close(); } catch (IOException ignored) {}
+        }
+    }
+
     void disconnectAll() {
         for (ConnectionImpl conn : connections.values()) {
             conn.close();
@@ -199,7 +232,9 @@ final class NioEventLoop implements Runnable {
                 } else {
                     // Plaintext: connection is ready immediately
                     if (pc.future != null) {
-                        pc.future.complete(conn);
+                        pc.future.complete(conn);       // outgoing client: unblock TcpClient.connect()
+                    } else if (pc.serverSide) {
+                        notifyAcceptListener(conn);     // server-accepted, handed off from accept loop
                     }
                 }
             } catch (IOException e) {
@@ -269,6 +304,17 @@ final class NioEventLoop implements Runnable {
         if (sc == null) {
             return;
         }
+
+        // When a pool of event loops is active, hand the raw channel off to a worker loop
+        // instead of registering it with this accept loop. The worker loop's
+        // drainPendingConnects() handles configureBlocking + registration.
+        Consumer<SocketChannel> handoff = acceptHandoff;
+        if (handoff != null) {
+            handoff.accept(sc);
+            return;
+        }
+
+        // Single-loop path: register the accepted connection with this loop directly.
         // Isolate per-connection setup so that any IOException (e.g. client disconnected
         // immediately, SSLEngine failure) does NOT propagate to processSelectedKeys().
         // If it did, the catch there would call closeKey() on the ServerSocketChannel's

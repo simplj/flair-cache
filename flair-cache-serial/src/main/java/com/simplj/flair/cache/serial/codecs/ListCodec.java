@@ -36,9 +36,13 @@ public final class ListCodec<T> implements Codec<List<T>> {
         return size;
     }
 
+    private static final int MAX_ELEMENTS = 10_000_000;
+
     @Override
     public List<T> deserialize(ByteBuffer buf) {
         int count = buf.getInt();
+        if (count < 0 || count > MAX_ELEMENTS)
+            throw new IllegalArgumentException("List element count out of range: " + count);
         List<T> list = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             list.add(elementCodec.deserialize(buf));
