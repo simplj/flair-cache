@@ -360,8 +360,8 @@ class ReplicationEngineTest {
             long ackTimeoutMs) throws IOException {
         UUID id = UUID.randomUUID();
         ReplicationEngine.Builder eb = ReplicationEngine.builder()
-                .localNodeId(id).ackTimeoutMs(ackTimeoutMs);
-        if (lookup != null) eb.blockLookup(lookup);
+                .localNodeId(id).ackTimeoutMs(ackTimeoutMs)
+                .blockLookup(lookup != null ? lookup : (name -> null));
         serverA = TcpServer.builder().port(0).handler(eb.frameHandler()).build();
         gossipA = gossip(id);
         return eb.transport(serverA).cluster(gossipA).build();

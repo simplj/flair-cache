@@ -91,6 +91,15 @@ final class FrameDecoder {
         }
     }
 
+    static UUID decodePingPong(byte[] payload) {
+        if (payload.length < 16) {
+            log.warning("PING/PONG payload too short: " + payload.length);
+            return null;
+        }
+        ByteBuffer buf = ByteBuffer.wrap(payload);
+        return new UUID(buf.getLong(), buf.getLong());
+    }
+
     static long decodeAck(byte[] payload) {
         if (payload.length < 8) {
             log.warning("ACK payload too short: " + payload.length);

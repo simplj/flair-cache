@@ -123,4 +123,31 @@ class FrameCodecTest {
         assertNotNull(decoded);
         assertArrayEquals(new byte[0], decoded.entry().value());
     }
+
+    @Test
+    void pingRoundTrip() {
+        UUID nodeId = UUID.randomUUID();
+        RawFrame frame = FrameEncoder.encodePing(nodeId);
+        assertEquals(FrameEncoder.TYPE_PING, frame.type());
+
+        UUID decoded = FrameDecoder.decodePingPong(frame.payload());
+        assertNotNull(decoded);
+        assertEquals(nodeId, decoded);
+    }
+
+    @Test
+    void pongRoundTrip() {
+        UUID nodeId = UUID.randomUUID();
+        RawFrame frame = FrameEncoder.encodePong(nodeId);
+        assertEquals(FrameEncoder.TYPE_PONG, frame.type());
+
+        UUID decoded = FrameDecoder.decodePingPong(frame.payload());
+        assertNotNull(decoded);
+        assertEquals(nodeId, decoded);
+    }
+
+    @Test
+    void decodePingPongTooShortReturnsNull() {
+        assertNull(FrameDecoder.decodePingPong(new byte[]{1, 2, 3}));
+    }
 }

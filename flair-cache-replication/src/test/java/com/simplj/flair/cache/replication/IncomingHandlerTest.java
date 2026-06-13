@@ -354,6 +354,43 @@ class IncomingHandlerTest {
         assertDoesNotThrow(() -> handler.onFrame(noOp(), bad));
     }
 
+    // ── PING / PONG ───────────────────────────────────────────────────────────
+
+    @Test
+    void ping_receives_pong_carrying_local_node_id() {
+        UUID senderId = UUID.randomUUID();
+        Capture cap = new Capture();
+
+        handler.onFrame(cap, FrameEncoder.encodePing(senderId));
+
+        assertEquals(1, cap.sent.size());
+        RawFrame response = cap.sent.get(0);
+        assertEquals(FrameEncoder.TYPE_PONG, response.type());
+        assertEquals(engine.localNodeId(), FrameDecoder.decodePingPong(response.payload()));
+    }
+
+    @Test
+    void pong_does_not_trigger_any_reply() {
+        UUID senderId = UUID.randomUUID();
+        Capture cap = new Capture();
+
+        handler.onFrame(cap, FrameEncoder.encodePong(senderId));
+
+        assertTrue(cap.sent.isEmpty(), "PONG must not trigger any reply frame");
+    }
+
+    @Test
+    void corrupt_ping_payload_still_sends_pong() {
+        // Even with an unreadable sender ID the local node still responds —
+        // we know our own ID and the connection is clearly alive.
+        RawFrame bad = new RawFrame(FrameEncoder.TYPE_PING, new byte[]{1, 2}); // too short
+        Capture cap = new Capture();
+
+        assertDoesNotThrow(() -> handler.onFrame(cap, bad));
+        assertEquals(1, cap.sent.size());
+        assertEquals(FrameEncoder.TYPE_PONG, cap.sent.get(0).type());
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static CacheEntry entry(byte[] value, long logical, long counter) {

@@ -10,6 +10,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -30,6 +32,8 @@ public final class ReplicationEngine {
     private final long batchWindowMs;
     private final int batchMaxFrames;
     private final long ackTimeoutMs;
+    private final long keepaliveIntervalMs;
+    private final long keepalivePongTimeoutMs;
 
     private final IncomingHandler incomingHandler;
     private final AckTracker ackTracker;
@@ -38,6 +42,7 @@ public final class ReplicationEngine {
 
     private volatile PeerRegistry peerRegistry;
     private volatile ReplicationFanout fanout;
+    private volatile ScheduledExecutorService keepaliveScheduler;
     private volatile Consumer<ReplicationEvent> incomingCallback;
 
     private ReplicationEngine(Builder b) {
@@ -46,10 +51,12 @@ public final class ReplicationEngine {
         this.cluster          = b.cluster;
         this.conflictResolver = b.conflictResolver;
         this.blockLookup      = b.blockLookup;
-        this.batchWindowMs    = b.batchWindowMs;
-        this.batchMaxFrames   = b.batchMaxFrames;
-        this.ackTimeoutMs     = b.ackTimeoutMs;
-        this.incomingHandler  = b.incomingHandler;
+        this.batchWindowMs          = b.batchWindowMs;
+        this.batchMaxFrames         = b.batchMaxFrames;
+        this.ackTimeoutMs           = b.ackTimeoutMs;
+        this.keepaliveIntervalMs    = b.keepaliveIntervalMs;
+        this.keepalivePongTimeoutMs = b.keepalivePongTimeoutMs;
+        this.incomingHandler        = b.incomingHandler;
         this.ackTracker       = new AckTracker();
     }
 
@@ -65,8 +72,17 @@ public final class ReplicationEngine {
         fanout = new ReplicationFanout(peerRegistry, cluster.members(), localNodeId,
                 batchWindowMs, batchMaxFrames);
 
+        // Register PeerRegistry so join/leave/dead events trigger immediate connect/disconnect.
+        // reconcilePeers() in ReplicationFanout provides polling-based fallback.
+        cluster.addMembershipListener(peerRegistry);
+
         incomingHandler.setEngine(this);
         fanout.start();
+
+        keepaliveScheduler = Executors.newSingleThreadScheduledExecutor(
+                new FlairCacheThreadFactory("flaircache-keepalive", true));
+        keepaliveScheduler.scheduleWithFixedDelay(this::keepaliveTick,
+                keepaliveIntervalMs, keepaliveIntervalMs, TimeUnit.MILLISECONDS);
 
         // Connect to peers already known alive at startup
         List<NodeInfo> alive = cluster.members().alive();
@@ -80,11 +96,19 @@ public final class ReplicationEngine {
     }
 
     public void shutdown() {
+        if (keepaliveScheduler != null) keepaliveScheduler.shutdownNow();
         if (fanout != null) fanout.shutdown();
         if (peerRegistry != null) peerRegistry.shutdown();
         ackTracker.shutdown();
         incomingHandler.setEngine(null);
         log.info("ReplicationEngine stopped");
+    }
+
+    private void keepaliveTick() {
+        PeerRegistry registry = peerRegistry;
+        if (registry == null) return;
+        registry.disconnectStalePeers(keepalivePongTimeoutMs);
+        registry.sendPingToAll(localNodeId);
     }
 
     // ── Replication API ───────────────────────────────────────────────────────
@@ -190,6 +214,10 @@ public final class ReplicationEngine {
 
     // ── Package-private accessors ─────────────────────────────────────────────
 
+    UUID localNodeId() { return localNodeId; }
+
+    PeerRegistry peerRegistry() { return peerRegistry; }
+
     ConflictResolver conflictResolver() { return conflictResolver; }
 
     Function<String, CacheBlock<?, ?>> blockLookup() { return blockLookup; }
@@ -211,14 +239,16 @@ public final class ReplicationEngine {
 
     public static final class Builder {
 
-        private UUID                              localNodeId      = UUID.randomUUID();
+        private UUID                              localNodeId           = UUID.randomUUID();
         private TcpServer                         transport;
         private GossipNode                        cluster;
-        private ConflictResolver                  conflictResolver = LWWResolver.INSTANCE;
-        private Function<String, CacheBlock<?, ?>> blockLookup    = null;
-        private long                              batchWindowMs    = 2L;
-        private int                               batchMaxFrames   = 64;
-        private long                              ackTimeoutMs     = 500L;
+        private ConflictResolver                  conflictResolver      = LWWResolver.INSTANCE;
+        private Function<String, CacheBlock<?, ?>> blockLookup         = null;
+        private long                              batchWindowMs         = 2L;
+        private int                               batchMaxFrames        = 64;
+        private long                              ackTimeoutMs          = 500L;
+        private long                              keepaliveIntervalMs   = 5_000L;
+        private long                              keepalivePongTimeoutMs = 15_000L;
 
         private final IncomingHandler incomingHandler = new IncomingHandler();
 
@@ -267,6 +297,18 @@ public final class ReplicationEngine {
             return this;
         }
 
+        public Builder keepaliveIntervalMs(long ms) {
+            if (ms <= 0) throw new IllegalArgumentException("keepaliveIntervalMs must be positive");
+            this.keepaliveIntervalMs = ms;
+            return this;
+        }
+
+        public Builder keepalivePongTimeoutMs(long ms) {
+            if (ms <= 0) throw new IllegalArgumentException("keepalivePongTimeoutMs must be positive");
+            this.keepalivePongTimeoutMs = ms;
+            return this;
+        }
+
         /**
          * Returns the {@link FrameHandler} to wire into {@link TcpServer.Builder#handler(FrameHandler)}.
          * Call this before building the {@link TcpServer} so incoming frames reach the engine.
@@ -289,8 +331,9 @@ public final class ReplicationEngine {
         }
 
         public ReplicationEngine build() {
-            Objects.requireNonNull(transport, "transport must be set");
-            Objects.requireNonNull(cluster,   "cluster must be set");
+            Objects.requireNonNull(transport,    "transport must be set");
+            Objects.requireNonNull(cluster,      "cluster must be set");
+            Objects.requireNonNull(blockLookup,  "blockLookup must be set");
             return new ReplicationEngine(this);
         }
     }

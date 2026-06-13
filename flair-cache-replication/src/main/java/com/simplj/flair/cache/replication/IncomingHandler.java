@@ -6,6 +6,7 @@ import com.simplj.flair.cache.transport.Connection;
 import com.simplj.flair.cache.transport.FrameHandler;
 import com.simplj.flair.cache.transport.RawFrame;
 
+import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
@@ -29,6 +30,8 @@ final class IncomingHandler implements FrameHandler {
         switch (frame.type()) {
             case FrameEncoder.TYPE_PUT:    handlePut(e, source, frame);    break;
             case FrameEncoder.TYPE_DELETE: handleDelete(e, source, frame); break;
+            case FrameEncoder.TYPE_PING:   handlePing(e, source);          break;
+            case FrameEncoder.TYPE_PONG:   handlePong(e, frame);           break;
             case FrameEncoder.TYPE_ACK:    handleAck(e, frame);            break;
             default:
                 if (log.isLoggable(Level.FINEST)) {
@@ -41,6 +44,7 @@ final class IncomingHandler implements FrameHandler {
         FrameDecoder.DecodedPut decoded = FrameDecoder.decodePut(frame.payload());
         if (decoded == null) return;
 
+        boolean applied = false;
         Function<String, CacheBlock<?, ?>> lookup = engine.blockLookup();
         if (lookup != null) {
             CacheBlock<?, ?> block = lookup.apply(decoded.blockName());
@@ -58,6 +62,7 @@ final class IncomingHandler implements FrameHandler {
                 if (existing == null || winner != existing) {
                     block.putRaw(decoded.key(), winner);
                 }
+                applied = true;
             }
         }
 
@@ -73,7 +78,9 @@ final class IncomingHandler implements FrameHandler {
             }
         }
 
-        if (decoded.needsAck()) {
+        // Only ACK if the write was actually applied — a phantom ACK from a node that doesn't
+        // know the block would count toward QUORUM/STRONG without data being stored.
+        if (decoded.needsAck() && applied) {
             source.send(FrameEncoder.encodeAck(decoded.frameId()));
             if (log.isLoggable(Level.FINEST)) {
                 log.finest("Sent ACK frameId=" + decoded.frameId());
@@ -85,6 +92,7 @@ final class IncomingHandler implements FrameHandler {
         FrameDecoder.DecodedDelete decoded = FrameDecoder.decodeDelete(frame.payload());
         if (decoded == null) return;
 
+        boolean applied = false;
         Function<String, CacheBlock<?, ?>> lookup = engine.blockLookup();
         if (lookup != null) {
             CacheBlock<?, ?> block = lookup.apply(decoded.blockName());
@@ -92,6 +100,7 @@ final class IncomingHandler implements FrameHandler {
                 // Sync HLC with the remote clock before applying — spec requires it for all frames
                 block.updateClock(decoded.hlc());
                 block.deleteRaw(decoded.key());
+                applied = true;
             }
         }
 
@@ -105,11 +114,30 @@ final class IncomingHandler implements FrameHandler {
             }
         }
 
-        if (decoded.needsAck()) {
+        // Only ACK if the delete was actually applied — same reasoning as PUT.
+        if (decoded.needsAck() && applied) {
             source.send(FrameEncoder.encodeAck(decoded.frameId()));
             if (log.isLoggable(Level.FINEST)) {
                 log.finest("Sent ACK frameId=" + decoded.frameId());
             }
+        }
+    }
+
+    private void handlePing(ReplicationEngine engine, Connection source) {
+        // Respond regardless of whether we can parse the sender's ID — we know our own
+        source.send(FrameEncoder.encodePong(engine.localNodeId()));
+        if (log.isLoggable(Level.FINEST)) {
+            log.finest("Received PING; sent PONG from " + engine.localNodeId());
+        }
+    }
+
+    private void handlePong(ReplicationEngine engine, RawFrame frame) {
+        UUID senderId = FrameDecoder.decodePingPong(frame.payload());
+        if (senderId == null) return;
+        PeerRegistry registry = engine.peerRegistry();
+        if (registry != null) registry.onPong(senderId);
+        if (log.isLoggable(Level.FINEST)) {
+            log.finest("Received PONG from " + senderId);
         }
     }
 

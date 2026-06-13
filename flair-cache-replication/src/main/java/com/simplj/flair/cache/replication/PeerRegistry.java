@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -30,7 +31,14 @@ final class PeerRegistry implements MembershipListener {
 
     private final UUID localNodeId;
     private final NioEventLoop sharedEventLoop;
-    private final ConcurrentHashMap<UUID, Connection> outgoing = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Connection> outgoing    = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Long>       lastPongMs  = new ConcurrentHashMap<>();
+    // In-flight guard: prevents submitting a new doConnect while one is already running per peer.
+    private final Set<UUID>                           connecting  = ConcurrentHashMap.newKeySet();
+    // Earliest wall-clock time at which the next connect attempt is permitted per peer.
+    private final ConcurrentHashMap<UUID, Long>       nextRetryMs = new ConcurrentHashMap<>();
+    // Consecutive failure count per peer — drives exponential backoff calculation.
+    private final ConcurrentHashMap<UUID, Integer>    failureCount = new ConcurrentHashMap<>();
     private final ExecutorService connectPool;
 
     PeerRegistry(UUID localNodeId, NioEventLoop sharedEventLoop) {
@@ -45,7 +53,25 @@ final class PeerRegistry implements MembershipListener {
         if (node.id().equals(localNodeId)) return;
         Connection existing = outgoing.get(node.id());
         if (existing != null && existing.isAlive()) return;
-        connectPool.submit(() -> doConnect(node));
+
+        // In-flight guard: if a doConnect is already running for this peer, skip.
+        // The running attempt will update state (success clears backoff; failure sets it).
+        if (!connecting.add(node.id())) return;
+
+        // Backoff guard: if the previous failure set a retry deadline that hasn't passed, skip.
+        Long retryAt = nextRetryMs.get(node.id());
+        if (retryAt != null && System.currentTimeMillis() < retryAt) {
+            connecting.remove(node.id());
+            return;
+        }
+
+        connectPool.submit(() -> {
+            try {
+                doConnect(node);
+            } finally {
+                connecting.remove(node.id());
+            }
+        });
     }
 
     void send(UUID peerId, RawFrame frame) {
@@ -89,7 +115,34 @@ final class PeerRegistry implements MembershipListener {
         return count;
     }
 
+    void onPong(UUID peerId) {
+        lastPongMs.put(peerId, System.currentTimeMillis());
+    }
+
+    void sendPingToAll(UUID localNodeId) {
+        RawFrame ping = FrameEncoder.encodePing(localNodeId);
+        for (Connection conn : outgoing.values()) {
+            if (conn.isAlive()) {
+                conn.send(ping);
+            }
+        }
+    }
+
+    void disconnectStalePeers(long pongTimeoutMs) {
+        long now = System.currentTimeMillis();
+        for (java.util.Map.Entry<UUID, Connection> e : outgoing.entrySet()) {
+            UUID peerId = e.getKey();
+            if (!e.getValue().isAlive()) continue;
+            Long lastPong = lastPongMs.get(peerId);
+            if (lastPong != null && now - lastPong > pongTimeoutMs) {
+                log.warning("Peer " + peerId + " missed keepalive; closing stale connection");
+                disconnectPeer(peerId);
+            }
+        }
+    }
+
     void disconnectPeer(UUID nodeId) {
+        lastPongMs.remove(nodeId);
         Connection conn = outgoing.remove(nodeId);
         if (conn != null) {
             conn.close();
@@ -102,12 +155,17 @@ final class PeerRegistry implements MembershipListener {
             conn.close();
         }
         outgoing.clear();
+        lastPongMs.clear();
+        connecting.clear();
+        nextRetryMs.clear();
+        failureCount.clear();
     }
 
     // ── MembershipListener ────────────────────────────────────────────────────
 
     @Override
     public void onJoin(NodeInfo node) {
+        clearRetryState(node.id()); // fresh join — no prior failure history applies
         connectAsync(node);
         log.fine("Peer joined, initiating connection: " + node.addressString());
     }
@@ -119,7 +177,7 @@ final class PeerRegistry implements MembershipListener {
 
     @Override
     public void onRecover(NodeInfo node) {
-        // Single lookup — avoids TOCTOU between containsKey() and get()
+        clearRetryState(node.id()); // recovered from SUSPECT — allow immediate reconnect
         Connection existing = outgoing.get(node.id());
         if (existing == null || !existing.isAlive()) {
             connectAsync(node);
@@ -128,12 +186,14 @@ final class PeerRegistry implements MembershipListener {
 
     @Override
     public void onLeave(NodeInfo node) {
+        clearRetryState(node.id()); // SWIM has removed this peer — no future retries needed
         disconnectPeer(node.id());
         log.fine("Peer left, closed connection: " + node.id());
     }
 
     @Override
     public void onDead(NodeInfo node) {
+        clearRetryState(node.id()); // SWIM has removed this peer — no future retries needed
         disconnectPeer(node.id());
         log.fine("Peer declared dead, closed connection: " + node.id());
     }
@@ -167,10 +227,28 @@ final class PeerRegistry implements MembershipListener {
                 // Another connect raced and won; close the duplicate
                 conn.close();
             } else {
+                // Success: clear any accumulated backoff so future disconnects reconnect promptly.
+                failureCount.remove(node.id());
+                nextRetryMs.remove(node.id());
+                // Seed the pong timestamp so disconnectStalePeers gives this connection
+                // a full grace period before it expects a PONG reply.
+                lastPongMs.put(node.id(), System.currentTimeMillis());
                 log.fine("Connected to peer " + node.id() + " at " + node.addressString());
             }
         } catch (IOException e) {
             log.log(Level.WARNING, "Failed to connect to peer " + node.addressString(), e);
+            // Exponential backoff: 100ms → 200ms → 400ms → 800ms → 1600ms → 3200ms → 10s cap.
+            // Prevents reconcilePeers() (runs every 2ms) from flooding the connect pool with
+            // attempts against an unreachable peer.
+            int failures = failureCount.merge(node.id(), 1, Integer::sum);
+            long backoffMs = (failures > 6) ? 10_000L : (100L << (failures - 1));
+            nextRetryMs.put(node.id(), System.currentTimeMillis() + backoffMs);
         }
+    }
+
+    private void clearRetryState(UUID nodeId) {
+        failureCount.remove(nodeId);
+        nextRetryMs.remove(nodeId);
+        // 'connecting' entry is always removed by the finally block in connectPool.submit()
     }
 }

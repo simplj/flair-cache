@@ -21,12 +21,13 @@ public final class GossipNode {
     private final InetAddress        bindAddress;
     private final int                bindPort;
     private final GossipConfig       config;
-    private final MembershipListener listener;
 
     private final MembershipList    members;
     private final PiggybackQueue    piggyback;
     private final IncarnationClock  incarnation;
     private final FailureDetector   failureDetector;
+    // CopyOnWriteArrayList: addMembershipListener() may race with tick/receive threads calling onXxx()
+    private final java.util.concurrent.CopyOnWriteArrayList<MembershipListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     // For PING_REQ forwarding: targetId → set of original requesters.
     // A Set (not single address) because two nodes can simultaneously ask us to probe the same target.
@@ -52,7 +53,7 @@ public final class GossipNode {
                 .fanout(b.fanout)
                 .seedPeers(b.seedPeers)
                 .build();
-        this.listener        = b.listener;
+        if (b.listener != null) this.listeners.add(b.listener);
         this.members         = new MembershipList();
         this.piggyback       = new PiggybackQueue();
         this.incarnation     = new IncarnationClock();
@@ -118,7 +119,7 @@ public final class GossipNode {
             members.addOrUpdate(suspected);
             piggyback.add(suspected);
             suspectedSince.putIfAbsent(peerId, System.currentTimeMillis());
-            if (listener != null) listener.onSuspect(suspected);
+            notifyListeners(l -> l.onSuspect(suspected));
             if (running && socket != null) {
                 GossipMessage ping = GossipMessage.ping(nodeId, incarnation.current(), List.of(suspected));
                 try { sendTo(ping, n.address(), n.port()); }
@@ -259,7 +260,7 @@ public final class GossipNode {
                     suspectedSince.remove(msg.senderId);
                     NodeInfo alive = members.find(msg.senderId).orElse(n.withStatus(NodeStatus.ALIVE));
                     piggyback.add(alive);
-                    if (listener != null) listener.onRecover(alive);
+                    notifyListeners(l -> l.onRecover(alive));
                 }
             } else {
                 members.addOrUpdate(n.withLastSeen(System.currentTimeMillis()));
@@ -344,9 +345,9 @@ public final class GossipNode {
         if (accepted) {
             piggyback.add(joiner);
             if (wasSuspected) {
-                if (listener != null) listener.onRecover(joiner);
+                notifyListeners(l -> l.onRecover(joiner));
             } else if (!wasKnown) {
-                if (listener != null) listener.onJoin(joiner);
+                notifyListeners(l -> l.onJoin(joiner));
             }
         }
 
@@ -370,7 +371,7 @@ public final class GossipNode {
             if (accepted) {
                 piggyback.add(member);  // schedule for epidemic re-dissemination from this joiner
             }
-            if (isNew && accepted && listener != null) listener.onJoin(member);
+            if (isNew && accepted) notifyListeners(l -> l.onJoin(member));
         }
     }
 
@@ -382,7 +383,7 @@ public final class GossipNode {
             indirectFor.remove(msg.senderId);
             if (removed) {
                 piggyback.add(n.withStatus(NodeStatus.DEAD));  // epidemic dissemination of graceful leave
-                if (listener != null) listener.onLeave(n);
+                notifyListeners(l -> l.onLeave(n));
             }
         });
         log.fine("Node left: " + msg.senderId);
@@ -404,7 +405,7 @@ public final class GossipNode {
                     boolean added = members.addOrUpdate(delta);
                     if (added) {
                         piggyback.add(delta);
-                        if (listener != null) listener.onJoin(delta);
+                        notifyListeners(l -> l.onJoin(delta));
                     }
                 } else if (delta.status() == NodeStatus.DEAD) {
                     // Write tombstone even for unknown nodes — without it, a stale ALIVE(higher-inc)
@@ -432,7 +433,7 @@ public final class GossipNode {
                 indirectFor.remove(delta.id());
                 if (removed) {
                     piggyback.add(delta);
-                    if (listener != null) listener.onDead(delta);
+                    notifyListeners(l -> l.onDead(delta));
                 }
             } else {
                 // Now that dominance is confirmed, clear probe for fresh ALIVE (not before the check —
@@ -449,11 +450,11 @@ public final class GossipNode {
                     // Update probe state so checkProbeTimeouts won't escalate and fire onSuspect again
                     failureDetector.markSuspected(delta.id());
                     suspectedSince.putIfAbsent(delta.id(), System.currentTimeMillis());
-                    if (listener != null) listener.onSuspect(delta);
+                    notifyListeners(l -> l.onSuspect(delta));
                 } else if (newStatus == NodeStatus.ALIVE && prevStatus == NodeStatus.SUSPECTED) {
                     suspectedSince.remove(delta.id());
                     failureDetector.clear(delta.id());
-                    if (listener != null) listener.onRecover(delta);
+                    notifyListeners(l -> l.onRecover(delta));
                 }
             }
         }
@@ -490,7 +491,7 @@ public final class GossipNode {
         failureDetector.markSuspected(peer.id());
         suspectedSince.putIfAbsent(peer.id(), System.currentTimeMillis());
         piggyback.add(suspected);
-        if (listener != null) listener.onSuspect(suspected);
+        notifyListeners(l -> l.onSuspect(suspected));
         log.fine("Node suspected: " + peer.id());
     }
 
@@ -504,7 +505,7 @@ public final class GossipNode {
         if (removed) {
             NodeInfo dead = peer.withStatus(NodeStatus.DEAD);
             piggyback.add(dead);
-            if (listener != null) listener.onDead(dead);
+            notifyListeners(l -> l.onDead(dead));
             log.fine("Node dead: " + peer.id());
         }
     }
@@ -517,7 +518,7 @@ public final class GossipNode {
             boolean added = members.addOrUpdate(n);
             if (added) {
                 piggyback.add(n);  // epidemic-disseminate nodes discovered via direct PING
-                if (listener != null) listener.onJoin(n);
+                notifyListeners(l -> l.onJoin(n));
             }
         }
     }
@@ -551,6 +552,20 @@ public final class GossipNode {
             case DEAD:      return 2;
             case SUSPECTED: return 1;
             default:        return 0;
+        }
+    }
+
+    /**
+     * Registers an additional membership event listener. Safe to call at any time,
+     * including after {@link #start()}. All listeners are notified in registration order.
+     */
+    public void addMembershipListener(MembershipListener listener) {
+        listeners.add(listener);
+    }
+
+    private void notifyListeners(java.util.function.Consumer<MembershipListener> action) {
+        for (MembershipListener l : listeners) {
+            try { action.accept(l); } catch (Exception e) { log.log(Level.WARNING, "MembershipListener threw", e); }
         }
     }
 

@@ -11,6 +11,8 @@ final class FrameEncoder {
 
     static final byte TYPE_PUT    = 0x01;
     static final byte TYPE_DELETE = 0x02;
+    static final byte TYPE_PING   = 0x03;
+    static final byte TYPE_PONG   = 0x04;
     static final byte TYPE_ACK    = 0x08;
 
     private static final byte NEEDS_ACK = 0x01;
@@ -63,6 +65,20 @@ final class FrameEncoder {
         buf.putLong(nodeId.getMostSignificantBits());
         buf.putLong(nodeId.getLeastSignificantBits());
         return new RawFrame(TYPE_DELETE, buf.array());
+    }
+
+    static RawFrame encodePing(UUID nodeId) {
+        ByteBuffer buf = ByteBuffer.allocate(16);
+        buf.putLong(nodeId.getMostSignificantBits());
+        buf.putLong(nodeId.getLeastSignificantBits());
+        return new RawFrame(TYPE_PING, buf.array());
+    }
+
+    static RawFrame encodePong(UUID nodeId) {
+        ByteBuffer buf = ByteBuffer.allocate(16);
+        buf.putLong(nodeId.getMostSignificantBits());
+        buf.putLong(nodeId.getLeastSignificantBits());
+        return new RawFrame(TYPE_PONG, buf.array());
     }
 
     static RawFrame encodeAck(long frameId) {

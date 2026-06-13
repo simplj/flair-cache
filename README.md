@@ -294,6 +294,9 @@ FLAIR is a pure in-memory store. A node that restarts loses its local data and m
 **Bootstrap has no concurrency limit for simultaneous joins**
 When multiple nodes join the cluster at the same time, the donor spawns one dedicated `flaircache-bootstrap-sync` thread per joiner with no upper bound. Each thread holds a full point-in-time snapshot in memory for the duration of the transfer. Joining 20+ nodes simultaneously will create 20+ threads and proportionally high heap pressure on the donor. Rolling joins — bringing nodes up one or a few at a time — are strongly recommended in V1. A semaphore-backed sync pool with a configurable concurrency cap is planned for V2.
 
+**Asymmetric connectivity causes missed writes**
+FLAIR uses a push-from-origin replication model: the node that writes a value fans it out directly to all live TCP peers. If the writing node (Node A) cannot reach a peer (Node C) over TCP, but other nodes (Node B) can reach Node C, the write is silently skipped for Node C. SWIM gossip correctly keeps Node C as `ALIVE` via indirect probing — the replication layer and the membership layer disagree. The write is lost for Node C until the TCP connection between A and C recovers. A relay replication mechanism — where A routes through an intermediary confirmed by SWIM indirect probing — is planned for V2. See [`prompts/v2-relay-replication.md`](prompts/v2-relay-replication.md) for the full design.
+
 ---
 
 ## V2 Roadmap
@@ -311,6 +314,7 @@ When multiple nodes join the cluster at the same time, the donor spawns one dedi
 | Write-through / write-behind | Propagate writes to an external store (database, file) |
 | Topology-aware replication | Rack / zone awareness to reduce cross-AZ replication traffic |
 | Per-block ACLs | Fine-grained read/write access control per cache block |
+| **Relay replication** | **Route writes through intermediary nodes when direct TCP to a peer is unavailable but the peer is SWIM-alive; SWIM indirect supporters are used as preferred relay candidates; configurable relay count (0 = disabled, fall back to re-sync on reconnect)** — see [`prompts/v2-relay-replication.md`](prompts/v2-relay-replication.md) |
 
 ---
 
