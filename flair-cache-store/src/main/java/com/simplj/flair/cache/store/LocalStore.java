@@ -61,10 +61,20 @@ final class LocalStore {
     void putRaw(byte[] key, CacheEntry entry) {
         hlc.update(entry.hlc()); // keep local clock consistent with cluster
         ByteArrayKey bk = new ByteArrayKey(key);
-        store.put(bk, entry);
+        // accessEpochMs and hitCount are local metadata — wire decoders always set both to 0.
+        // For new entries: stamp now / start at 0 so they are not immediately LRU/LFU candidates.
+        // For existing entries: preserve both fields so eviction reflects actual local read
+        // activity, not replication write frequency. A hot key whose value is updated by
+        // replication must not lose its accumulated hit count or last-access timestamp.
+        CacheEntry existing = store.get(bk);
+        long accessMs  = existing != null ? existing.accessEpochMs() : System.currentTimeMillis();
+        long hitCount  = existing != null ? existing.hitCount()      : 0L;
+        CacheEntry stamped = new CacheEntry(
+                entry.value(), entry.hlc(), entry.expiryEpochMs(), accessMs, hitCount, entry.originNodeId());
+        store.put(bk, stamped);
         // No eviction triggered: replication/bootstrap may push store past maxEntries temporarily.
         // The caller controls the flow; evicting mid-sync would corrupt the sync.
-        notifyPut(key, entry);
+        notifyPut(key, stamped);
     }
 
     // ── Read path (hot — must be sub-200ns) ─────────────────────────────────
@@ -90,8 +100,10 @@ final class LocalStore {
         }
         if (policy == EvictionPolicy.LRU || policy == EvictionPolicy.LFU) {
             if (now - entry.accessEpochMs() > LRU_UPDATE_GRANULARITY_MS) {
-                // Lazy update — acceptable race: concurrent updates converge to recent nowMs
-                store.compute(key, (k, e) -> e == null ? null : e.withAccess(now));
+                // Best-effort CAS: if a concurrent write has already replaced this entry,
+                // replace() returns false and we skip — acceptable for LRU/LFU approximation.
+                // Using replace() instead of compute() keeps the allocation outside the bucket lock.
+                store.replace(key, entry, entry.withAccess(now));
             }
         }
         hits.increment();
@@ -133,6 +145,10 @@ final class LocalStore {
 
     void clear() {
         store.clear();
+    }
+
+    void updateClock(HLCTimestamp remote) {
+        hlc.update(remote);
     }
 
     // ── Expiry sweep (called by ExpiryManager on flaircache-expiry-sweep) ───

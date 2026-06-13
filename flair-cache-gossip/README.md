@@ -282,9 +282,9 @@ DEAD nodes are never in `MembershipList.alive()` or `MembershipList.suspected()`
 All gossip messages are sent as single UDP datagrams. Packets are capped at **1400 bytes** (safely below the standard 1500-byte Ethernet MTU — no IP fragmentation).
 
 ```
-┌─ TYPE(1) ─┬─ SENDER_UUID(16) ─┬─ INCARNATION(8) ─┬─[TARGET_UUID(16)]─┬─ NUM_DELTAS(2) ─┬─ DELTAS ─┐
-│  see below │  sender node ID   │  sender's clock  │  PING_REQ only    │  0..MAX (~31)   │  see below│
-└────────────┴──────────────────┴──────────────────┴───────────────────┴─────────────────┴──────────┘
+┌─ TYPE(1) ──┬─ SENDER_UUID(16) ─┬─ INCARNATION(8) ─┬─[TARGET_UUID(16)]─┬─ NUM_DELTAS(2) ─┬─ DELTAS ───┐
+│  see below │  sender node ID   │  sender's clock  │  PING_REQ only    │  0..MAX (~31)   │  see below │
+└────────────┴───────────────────┴──────────────────┴───────────────────┴─────────────────┴────────────┘
 ```
 
 **Message types:**

@@ -112,7 +112,8 @@ TcpServer server = TcpServer.builder()
     .bindAddress("0.0.0.0")       // default
     .port(7890)                    // 0 = OS-assigned (use localPort() after build)
     .handler(frameHandler)         // required — called for every inbound frame
-    .workerThreads(4)              // thread pool for dispatching frames (default 4)
+    .selectorThreads(1)            // NIO selector thread count (default 1 — see below)
+    .workerThreads(4)              // frame dispatch pool per selector thread (default 4)
     .readBufferBytes(65536)        // per-connection read buffer (default 64 KB)
     .queueCapacity(4096)           // per-connection write queue depth (default 4096)
     .backpressurePolicy(BackpressurePolicy.DROP_OLDEST) // default
@@ -120,12 +121,20 @@ TcpServer server = TcpServer.builder()
     .tls(TlsConfig.disabled())     // default — see TLS section
     .build();                      // throws IOException if bind fails
 
-server.start();                    // starts the selector thread
+server.start();                    // starts the selector thread(s)
 server.localPort();                // actual bound port (useful when port=0)
-server.eventLoop();                // NioEventLoop — share with TcpClient to multiplex
+server.eventLoop();                // NioEventLoop — round-robins across the pool
 server.onConnect(conn -> { });     // called when a new connection is accepted
-server.shutdown();                 // closes all connections and stops the selector
+server.shutdown();                 // closes all connections and stops all selectors
 ```
+
+#### `selectorThreads`
+
+Controls how many NIO selector threads share the connection load. The default of `1` is correct for most use cases — a single `select()` call batches all ready channels and is often faster than multiple threads due to better CPU cache locality and no cross-thread contention.
+
+**When to increase:** when managing a large number of simultaneous persistent connections (e.g. 20+ peers in `flair-cache-replication`) and profiling shows the selector thread as a CPU bottleneck. Rule of thumb: **1 selector per ~30 connections, capped at CPU core count**. Total I/O thread count = `selectorThreads × workerThreads`.
+
+**When to keep at 1:** fewer than ~20 connections, or any scenario where write throughput does not saturate the selector. Do not increase `selectorThreads` to fix slow `FrameHandler` callbacks — those run on worker threads; increase `workerThreads` instead.
 
 ### `TcpClient`
 
