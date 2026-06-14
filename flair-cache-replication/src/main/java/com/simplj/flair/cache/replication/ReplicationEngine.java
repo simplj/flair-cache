@@ -328,6 +328,12 @@ public final class ReplicationEngine {
 
     IncomingHandler incomingHandler() { return incomingHandler; }
 
+    /** Returns the number of replication frames currently queued but not yet sent. */
+    public long pendingFrameCount() {
+        ReplicationFanout f = fanout;
+        return f != null ? f.queueSize() : 0L;
+    }
+
     /** Initiate an outgoing connection to a peer. Used by bootstrap and tests. */
     void connectAsync(NodeInfo peer) {
         if (peerRegistry != null) peerRegistry.connectAsync(peer);

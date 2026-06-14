@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -28,6 +29,8 @@ public final class GossipNode {
     private final FailureDetector   failureDetector;
     // CopyOnWriteArrayList: addMembershipListener() may race with tick/receive threads calling onXxx()
     private final java.util.concurrent.CopyOnWriteArrayList<MembershipListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    private final LongAdder tickCount = new LongAdder();
 
     // For PING_REQ forwarding: targetId → set of original requesters.
     // A Set (not single address) because two nodes can simultaneously ask us to probe the same target.
@@ -132,10 +135,17 @@ public final class GossipNode {
 
     public int localPort() { return localPort; }
 
+    /** Returns {@code true} if this node has been started and not yet shut down. */
+    public boolean isStarted() { return running; }
+
     // ── Tick ─────────────────────────────────────────────────────────────────
+
+    /** Returns the total number of gossip ticks completed since this node started. */
+    public long gossipTickCount() { return tickCount.sum(); }
 
     void onTick() {
         if (!running) return;
+        tickCount.increment();
         long now = System.currentTimeMillis();
         checkProbeTimeouts(now);
         checkSuspicionTimeouts(now);

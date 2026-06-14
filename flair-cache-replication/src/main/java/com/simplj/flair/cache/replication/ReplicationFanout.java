@@ -58,6 +58,10 @@ final class ReplicationFanout implements Runnable {
         return queue.offer(event);
     }
 
+    int queueSize() {
+        return queue.size();
+    }
+
     @Override
     public void run() {
         List<QueuedEvent> batch = new ArrayList<>(batchMaxFrames);
