@@ -104,7 +104,7 @@ FLAIR is built as composable standalone modules. Each module is independently us
 | [Store](flair-cache-store/README.md) | `flair-cache-store` | Local in-memory cache — TTL, LRU/LFU eviction |
 | [Replication](flair-cache-replication/README.md) | `flair-cache-replication` | TCP fanout, ACK tracking, consistency modes |
 | [Bootstrap](flair-cache-bootstrap/README.md) | `flair-cache-bootstrap` | State sync for new node join |
-| DSL | `flair-cache-dsl` | Query DSL — filter, join, aggregate over cache blocks |
+| [DSL](flair-cache-dsl/README.md) | `flair-cache-dsl` | Query DSL — filter, join, aggregate over cache blocks |
 | Watch | `flair-cache-watch` | Reactivity — subscribe to cache change events |
 | Metrics | `flair-cache-metrics` | JMX metrics and monitoring |
 
@@ -265,7 +265,7 @@ FLAIR is currently in active development. The library is being built module by m
 - [x] [`flair-cache-store`](flair-cache-store/README.md) — Local store
 - [x] [`flair-cache-replication`](flair-cache-replication/README.md) — Replication engine
 - [x] [`flair-cache-bootstrap`](flair-cache-bootstrap/README.md) — Bootstrap sync
-- [ ] `flair-cache-dsl` — Query DSL
+- [x] [`flair-cache-dsl`](flair-cache-dsl/README.md) — Query DSL
 - [ ] `flair-cache-watch` — Watch / reactivity
 - [ ] `flair-cache-metrics` — JMX metrics
 - [ ] First stable release on Maven Central
@@ -291,11 +291,34 @@ Configurable queue capacity via `FlairCacheConfig` is planned for V2.
 **No persistence**
 FLAIR is a pure in-memory store. A node that restarts loses its local data and must receive a full state transfer from a live peer via the bootstrap sync process before serving consistent reads. Snapshot-to-disk and point-in-time recovery are planned for V2.
 
+**DSL `groupBy()` always executes sequentially**
+When `.parallel()` is chained before `.groupBy()`, the parallel hint is ignored — grouping
+always executes sequentially in V1. The `.parallel()` flag is still respected for `.fetch()`,
+`.count()`, `findFirst()`, and all other non-groupBy terminals. Parallel groupBy is planned
+for V2.
+
+**`Decoder.identity()` does not perform type checking**
+`Decoder.identity()` performs no runtime type verification. If a source map contains values of
+unexpected types, the error surfaces as a `ClassCastException` at the point of use rather than
+at the point of decoding — making the root cause hard to trace. Use `Decoder.typed(Class<T>)`
+when the source map may contain mixed value types. A convenience shorthand that defaults to safe
+type-checked decoding is planned for V2.
+
+**DSL join is limited to two sources**
+A single query chain can join exactly two named sources. Joining three or more sources requires
+running multiple queries in sequence and feeding intermediate results into the next query manually.
+Multi-source join in a single query chain is planned for V2.
+
+**DSL join returns only matched rows (inner join)**
+The DSL join always behaves like a SQL `INNER JOIN` — rows with no match on the other side are
+dropped. Left join (retain all left-side rows), right join, and full outer join are not supported
+in V1. These join types are planned for V2.
+
 **Bootstrap has no concurrency limit for simultaneous joins**
 When multiple nodes join the cluster at the same time, the donor spawns one dedicated `flaircache-bootstrap-sync` thread per joiner with no upper bound. Each thread holds a full point-in-time snapshot in memory for the duration of the transfer. Joining 20+ nodes simultaneously will create 20+ threads and proportionally high heap pressure on the donor. Rolling joins — bringing nodes up one or a few at a time — are strongly recommended in V1. A semaphore-backed sync pool with a configurable concurrency cap is planned for V2.
 
 **Asymmetric connectivity causes missed writes**
-FLAIR uses a push-from-origin replication model: the node that writes a value fans it out directly to all live TCP peers. If the writing node (Node A) cannot reach a peer (Node C) over TCP, but other nodes (Node B) can reach Node C, the write is silently skipped for Node C. SWIM gossip correctly keeps Node C as `ALIVE` via indirect probing — the replication layer and the membership layer disagree. The write is lost for Node C until the TCP connection between A and C recovers. A relay replication mechanism — where A routes through an intermediary confirmed by SWIM indirect probing — is planned for V2. See [`prompts/v2-relay-replication.md`](prompts/v2-relay-replication.md) for the full design.
+FLAIR uses a push-from-origin replication model: the node that writes a value fans it out directly to all live TCP peers. If the writing node (Node A) cannot reach a peer (Node C) over TCP, but other nodes (Node B) can reach Node C, the write is silently skipped for Node C. SWIM gossip correctly keeps Node C as `ALIVE` via indirect probing — the replication layer and the membership layer disagree. The write is lost for Node C until the TCP connection between A and C recovers. A relay replication mechanism is planned for V2.
 
 ---
 
@@ -314,7 +337,11 @@ FLAIR uses a push-from-origin replication model: the node that writes a value fa
 | Write-through / write-behind | Propagate writes to an external store (database, file) |
 | Topology-aware replication | Rack / zone awareness to reduce cross-AZ replication traffic |
 | Per-block ACLs | Fine-grained read/write access control per cache block |
-| **Relay replication** | **Route writes through intermediary nodes when direct TCP to a peer is unavailable but the peer is SWIM-alive; SWIM indirect supporters are used as preferred relay candidates; configurable relay count (0 = disabled, fall back to re-sync on reconnect)** — see [`prompts/v2-relay-replication.md`](prompts/v2-relay-replication.md) |
+| **Relay replication** | Route writes through intermediary nodes when direct TCP to a peer is unavailable — eliminates missed writes under asymmetric connectivity |
+| **DSL parallel groupBy** | `.parallel().groupBy().aggregate()` executes on the dedicated DSL worker pool instead of sequentially |
+| **DSL auto-typed decoder** | Convenience shorthand for `QueryEngine.from()` that defaults to safe type-checked decoding without requiring the class token twice |
+| **DSL multi-source join** | Join three or more named sources in a single fluent query chain |
+| **DSL left/right/full outer join** | Left, right, and full outer join support — retain unmatched rows from either side, consistent with SQL semantics |
 
 ---
 
