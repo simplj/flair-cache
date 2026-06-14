@@ -9,6 +9,10 @@ import java.util.function.Predicate;
 /**
  * Fluent builder for a two-source join query.
  *
+ * <p><b>Immutable builder:</b> every chaining method returns a new {@code JoinQuery}
+ * instance. The original instance is unchanged and may be safely stored as a
+ * join template and reused across multiple calls with different strategies or filters.</p>
+ *
  * <p>Two join strategies are available:
  * <ul>
  *   <li><b>Hash join O(n+m)</b> — call {@link #on(Function, Function)} when the join
@@ -17,8 +21,8 @@ import java.util.function.Predicate;
  *       predicates; correct but slower on large data sets.</li>
  * </ul>
  *
- * <p>The two strategies are mutually exclusive — calling {@code on()} a second time
- * with a different form replaces the previous strategy entirely.</p>
+ * <p>The two strategies are mutually exclusive — calling {@code on()} with one form
+ * returns a new instance with the other strategy cleared.</p>
  *
  * <p>Joins are always single-threaded in V1.</p>
  *
@@ -31,56 +35,78 @@ public final class JoinQuery<L, R> {
     private final Collection<Object> rightRaw;
     private final Decoder<R>         rightDecoder;
 
-    // Hash-join strategy — populated via on(leftKey, rightKey); null when nested-loop chosen
-    private Function<L, Object> leftKeyFn;
-    private Function<R, Object> rightKeyFn;
+    // Hash-join strategy fields — non-null only when hash-join was chosen via on(leftKey, rightKey)
+    private final Function<L, Object> leftKeyFn;
+    private final Function<R, Object> rightKeyFn;
 
-    // Nested-loop strategy — populated via on(BiPredicate); null when hash-join chosen
-    private BiPredicate<L, R> joinCondition;
+    // Nested-loop strategy — non-null only when on(BiPredicate) was chosen
+    private final BiPredicate<L, R> joinCondition;
 
-    private Predicate<L> leftFilter;
+    private final Predicate<L> leftFilter;
 
     @SuppressWarnings("unchecked")
     JoinQuery(Collection<?> leftRaw,  Decoder<L> leftDecoder,
               Collection<?> rightRaw, Decoder<R> rightDecoder) {
-        this.leftRaw      = (Collection<Object>) leftRaw;
+        this((Collection<Object>) leftRaw, leftDecoder,
+             (Collection<Object>) rightRaw, rightDecoder,
+             null, null, null, null);
+    }
+
+    private JoinQuery(Collection<Object> leftRaw,  Decoder<L> leftDecoder,
+                      Collection<Object> rightRaw, Decoder<R> rightDecoder,
+                      Predicate<L>        leftFilter,
+                      BiPredicate<L, R>   joinCondition,
+                      Function<L, Object> leftKeyFn,
+                      Function<R, Object> rightKeyFn) {
+        this.leftRaw      = leftRaw;
         this.leftDecoder  = leftDecoder;
-        this.rightRaw     = (Collection<Object>) rightRaw;
+        this.rightRaw     = rightRaw;
         this.rightDecoder = rightDecoder;
+        this.leftFilter   = leftFilter;
+        this.joinCondition = joinCondition;
+        this.leftKeyFn    = leftKeyFn;
+        this.rightKeyFn   = rightKeyFn;
     }
 
     // ── join strategy ──────────────────────────────────────────────────────────
 
     /**
      * Nested-loop join condition. Correct for any predicate; O(n×m).
-     * Replaces any previously set hash-join strategy.
+     * Returns a new {@code JoinQuery} with this strategy set, clearing any
+     * previously set hash-join strategy.
      * Prefer {@link #on(Function, Function)} for equality-key joins.
      */
     public JoinQuery<L, R> on(BiPredicate<L, R> condition) {
-        this.joinCondition = condition;
-        this.leftKeyFn     = null;   // strategies are mutually exclusive
-        this.rightKeyFn    = null;
-        return this;
+        if (condition == null) throw new IllegalArgumentException("condition must not be null");
+        return new JoinQuery<>(leftRaw, leftDecoder, rightRaw, rightDecoder,
+                leftFilter, condition, null, null);
     }
 
     /**
      * Hash join using key equality. O(n+m) — preferred over {@link #on(BiPredicate)}.
-     * Replaces any previously set nested-loop strategy.
+     * Returns a new {@code JoinQuery} with this strategy set, clearing any
+     * previously set nested-loop strategy.
      */
     @SuppressWarnings("unchecked")
     public <K> JoinQuery<L, R> on(Function<L, K> leftKey, Function<R, K> rightKey) {
-        this.leftKeyFn     = (Function<L, Object>) leftKey;
-        this.rightKeyFn    = (Function<R, Object>) rightKey;
-        this.joinCondition = null;   // strategies are mutually exclusive
-        return this;
+        if (leftKey == null || rightKey == null)
+            throw new IllegalArgumentException("key extractors must not be null");
+        return new JoinQuery<>(leftRaw, leftDecoder, rightRaw, rightDecoder,
+                leftFilter, null,
+                (Function<L, Object>) leftKey, (Function<R, Object>) rightKey);
     }
 
     // ── filters ───────────────────────────────────────────────────────────────
 
-    /** Filters left-side entries before the join is attempted. */
+    /**
+     * Filters left-side entries before the join is attempted.
+     * Returns a new {@code JoinQuery} with the filter ANDed onto any existing filter.
+     */
     public JoinQuery<L, R> where(Predicate<L> filter) {
-        this.leftFilter = leftFilter == null ? filter : leftFilter.and(filter);
-        return this;
+        if (filter == null) throw new IllegalArgumentException("filter must not be null");
+        Predicate<L> newFilter = leftFilter == null ? filter : leftFilter.and(filter);
+        return new JoinQuery<>(leftRaw, leftDecoder, rightRaw, rightDecoder,
+                newFilter, joinCondition, leftKeyFn, rightKeyFn);
     }
 
     // ── projection (pivot to terminal stage) ──────────────────────────────────

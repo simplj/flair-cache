@@ -3,12 +3,16 @@ package com.simplj.flair.cache.replication;
 import com.simplj.flair.cache.gossip.GossipNode;
 import com.simplj.flair.cache.gossip.NodeInfo;
 import com.simplj.flair.cache.store.CacheBlock;
+import com.simplj.flair.cache.store.CacheEntry;
+import com.simplj.flair.cache.store.DeleteListener;
+import com.simplj.flair.cache.store.PutListener;
 import com.simplj.flair.cache.transport.FrameHandler;
 import com.simplj.flair.cache.transport.TcpServer;
 
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -18,17 +22,44 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public final class ReplicationEngine {
 
     private static final Logger log = Logger.getLogger(ReplicationEngine.class.getName());
 
+    /**
+     * Thread-local flag set to {@code true} while the calling thread is applying an incoming
+     * replication frame (PUT or DELETE) to a local {@link CacheBlock}. The {@link PutListener}
+     * and {@link DeleteListener} registered by {@link #attachBlock} check this flag to suppress
+     * re-replication of writes that already arrived from a peer.
+     *
+     * <p>The bootstrap layer must also set this flag when applying {@code SYNC_CHUNK} entries:
+     * <pre>{@code
+     * ReplicationEngine.markIncoming(true);
+     * try { block.putRaw(key, entry); }
+     * finally { ReplicationEngine.markIncoming(false); }
+     * }</pre>
+     * </p>
+     */
+    static final ThreadLocal<Boolean> INCOMING = ThreadLocal.withInitial(() -> false);
+
+    /**
+     * Marks the calling thread as performing an incoming replication apply operation.
+     * Must be paired with {@code markIncoming(false)} in a {@code finally} block.
+     * Intended for the bootstrap layer to suppress re-replication of synced entries.
+     */
+    public static void markIncoming(boolean incoming) {
+        INCOMING.set(incoming);
+    }
+
     private final UUID localNodeId;
     private final TcpServer transport;
     private final GossipNode cluster;
     private final ConflictResolver conflictResolver;
-    private final Function<String, CacheBlock<?, ?>> blockLookup;
+    private final Function<String, CacheBlock<?, ?>> blockResolver;  // builder-provided lookup (may be null)
+    private final ConcurrentHashMap<String, CacheBlock<?, ?>> attachedBlocks = new ConcurrentHashMap<>();
     private final long batchWindowMs;
     private final int batchMaxFrames;
     private final long ackTimeoutMs;
@@ -50,7 +81,7 @@ public final class ReplicationEngine {
         this.transport        = b.transport;
         this.cluster          = b.cluster;
         this.conflictResolver = b.conflictResolver;
-        this.blockLookup      = b.blockLookup;
+        this.blockResolver    = b.blockLookup;
         this.batchWindowMs          = b.batchWindowMs;
         this.batchMaxFrames         = b.batchMaxFrames;
         this.ackTimeoutMs           = b.ackTimeoutMs;
@@ -109,6 +140,65 @@ public final class ReplicationEngine {
         if (registry == null) return;
         registry.disconnectStalePeers(keepalivePongTimeoutMs);
         registry.sendPingToAll(localNodeId);
+    }
+
+    // ── Block attachment (outgoing replication) ───────────────────────────────
+
+    /**
+     * Registers a {@link CacheBlock} so that local {@link CacheBlock#put put()} and
+     * {@link CacheBlock#delete delete()} calls automatically replicate to all alive peers.
+     *
+     * <p>The block is also registered for incoming frame delivery — the {@link IncomingHandler}
+     * can now apply PUT/DELETE frames addressed to {@code blockName} to this block.</p>
+     *
+     * <p>{@code mode} sets the consistency level for all outgoing writes originating on this
+     * node. Use {@link ConsistencyMode#EVENTUAL} for fire-and-forget, {@link ConsistencyMode#QUORUM}
+     * (recommended default) to block until a majority of peers ACK, or
+     * {@link ConsistencyMode#STRONG} to wait for all peers.</p>
+     *
+     * <p>Writes that arrive FROM peers (via replication frames or bootstrap sync) are never
+     * re-replicated — the engine suppresses them using a thread-local flag set in
+     * {@link IncomingHandler} and, for bootstrap, via {@link #markIncoming(boolean)}.</p>
+     *
+     * <p>TTL expiry events are intentionally not replicated: every node runs its own
+     * expiry sweep independently, using the {@code expiryEpochMs} carried on each entry.</p>
+     *
+     * @throws NullPointerException if {@code blockName}, {@code block}, or {@code mode} is null
+     */
+    public void attachBlock(String blockName, CacheBlock<?, ?> block, ConsistencyMode mode) {
+        Objects.requireNonNull(blockName, "blockName must not be null");
+        Objects.requireNonNull(block,     "block must not be null");
+        Objects.requireNonNull(mode,      "mode must not be null");
+
+        attachedBlocks.put(blockName, block);
+
+        // PutListener: two guards prevent re-replication of incoming writes.
+        // INCOMING (ThreadLocal) is set by IncomingHandler around putRaw() calls.
+        // originNodeId is non-null for all wire-decoded entries (null → UUID(0,0) on wire).
+        // Both together are defense-in-depth; INCOMING is the primary, reliable guard.
+        block.addPutListener((key, entry) -> {
+            if (INCOMING.get() || entry.originNodeId() != null) return;
+            try {
+                CacheEntry outgoing = new CacheEntry(
+                        entry.value(), entry.hlc(), entry.expiryEpochMs(), 0L, 0L, localNodeId);
+                replicate(ReplicationEvent.put(blockName, key, outgoing, mode));
+            } catch (ReplicationTimeoutException e) {
+                log.log(Level.WARNING, "Replication timed out for PUT block=" + blockName, e);
+            }
+        });
+
+        // DeleteListener: INCOMING flag only — originNodeId on the deleted entry reflects how
+        // it was WRITTEN, not how the delete arrived; it cannot discriminate local from replicated deletes.
+        // TTL expiry (ExpireListener) is not registered — each node sweeps independently.
+        block.addDeleteListener((key, entry) -> {
+            if (INCOMING.get()) return;
+            try {
+                replicate(ReplicationEvent.delete(
+                        blockName, key, block.hlcNow(), localNodeId, mode));
+            } catch (ReplicationTimeoutException e) {
+                log.log(Level.WARNING, "Replication timed out for DELETE block=" + blockName, e);
+            }
+        });
     }
 
     // ── Replication API ───────────────────────────────────────────────────────
@@ -220,7 +310,17 @@ public final class ReplicationEngine {
 
     ConflictResolver conflictResolver() { return conflictResolver; }
 
-    Function<String, CacheBlock<?, ?>> blockLookup() { return blockLookup; }
+    /**
+     * Returns a composed lookup: checks {@link #attachedBlocks} first (registered via
+     * {@link #attachBlock}), then falls back to the builder-provided {@code blockLookup} function.
+     */
+    Function<String, CacheBlock<?, ?>> blockLookup() {
+        return name -> {
+            CacheBlock<?, ?> b = attachedBlocks.get(name);
+            if (b != null) return b;
+            return blockResolver != null ? blockResolver.apply(name) : null;
+        };
+    }
 
     Consumer<ReplicationEvent> incomingCallback() { return incomingCallback; }
 
@@ -274,6 +374,10 @@ public final class ReplicationEngine {
             return this;
         }
 
+        /**
+         * Provides a block lookup function for the incoming handler. Optional when blocks are
+         * registered exclusively via {@link ReplicationEngine#attachBlock}.
+         */
         public Builder blockLookup(Function<String, CacheBlock<?, ?>> lookup) {
             this.blockLookup = Objects.requireNonNull(lookup, "blockLookup must not be null");
             return this;
@@ -324,6 +428,7 @@ public final class ReplicationEngine {
          * ReplicationEngine engine = eb.transport(server).build();
          * server.start();
          * engine.start();
+         * engine.attachBlock("items", block, ConsistencyMode.EVENTUAL);
          * }</pre>
          */
         public FrameHandler frameHandler() {
@@ -331,9 +436,9 @@ public final class ReplicationEngine {
         }
 
         public ReplicationEngine build() {
-            Objects.requireNonNull(transport,    "transport must be set");
-            Objects.requireNonNull(cluster,      "cluster must be set");
-            Objects.requireNonNull(blockLookup,  "blockLookup must be set");
+            Objects.requireNonNull(transport, "transport must be set");
+            Objects.requireNonNull(cluster,   "cluster must be set");
+            // blockLookup is optional — callers may use attachBlock() after build() instead.
             return new ReplicationEngine(this);
         }
     }

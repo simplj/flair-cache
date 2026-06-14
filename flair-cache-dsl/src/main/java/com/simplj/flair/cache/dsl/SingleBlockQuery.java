@@ -63,6 +63,7 @@ public final class SingleBlockQuery<T> {
 
     /** Adds a filter predicate (ANDed with any existing predicate). */
     public SingleBlockQuery<T> where(Predicate<T> filter) {
+        if (filter == null) throw new IllegalArgumentException("filter must not be null");
         QueryPredicate<T> newPred = predicate == null
                 ? QueryPredicate.of(filter)
                 : predicate.and(QueryPredicate.of(filter));
@@ -72,11 +73,12 @@ public final class SingleBlockQuery<T> {
 
     /** ANDs an additional predicate onto the current filter. */
     public SingleBlockQuery<T> and(Predicate<T> filter) {
-        return where(filter);
+        return where(filter);   // null guard is in where()
     }
 
     /** ORs an additional predicate onto the current filter. */
     public SingleBlockQuery<T> or(Predicate<T> filter) {
+        if (filter == null) throw new IllegalArgumentException("filter must not be null");
         QueryPredicate<T> newPred = predicate == null
                 ? QueryPredicate.of(filter)
                 : predicate.or(QueryPredicate.of(filter));
@@ -89,10 +91,29 @@ public final class SingleBlockQuery<T> {
     /**
      * Sorts results by {@code keyExtractor}.
      * <b>This materialises the full filtered stream</b> — always use with {@link #limit}.
+     *
+     * <p>Null keys are treated as the minimum value: they sort before all non-null values
+     * in {@link Order#ASC} order and after all non-null values in {@link Order#DESC} order.
+     * Use {@link #orderBy(Function, Order, NullOrdering)} to control null placement explicitly.</p>
      */
     public <U extends Comparable<U>> SingleBlockQuery<T> orderBy(
             Function<T, U> keyExtractor, Order order) {
-        Comparator<T> cmp = Comparator.comparing(keyExtractor);
+        return orderBy(keyExtractor, order, NullOrdering.NULLS_FIRST);
+    }
+
+    /**
+     * Sorts results by {@code keyExtractor} with explicit control over where null keys land.
+     * <b>This materialises the full filtered stream</b> — always use with {@link #limit}.
+     *
+     * @param nullOrdering {@link NullOrdering#NULLS_FIRST} places null keys before all
+     *                     non-null values; {@link NullOrdering#NULLS_LAST} places them after
+     */
+    public <U extends Comparable<U>> SingleBlockQuery<T> orderBy(
+            Function<T, U> keyExtractor, Order order, NullOrdering nullOrdering) {
+        Comparator<U> base = nullOrdering == NullOrdering.NULLS_FIRST
+                ? Comparator.nullsFirst(Comparator.naturalOrder())
+                : Comparator.nullsLast(Comparator.naturalOrder());
+        Comparator<T> cmp = Comparator.comparing(keyExtractor, base);
         Comparator<T> newOrdering = order == Order.DESC ? cmp.reversed() : cmp;
         return new SingleBlockQuery<>(registry, rawData, decoder, parallelPool,
                 predicate, newOrdering, limit, offset, parallel);
@@ -139,11 +160,7 @@ public final class SingleBlockQuery<T> {
         }
         Collection<Object> rightRaw = registry.getCollection(rightName);
         JoinQuery<T, R> jq = new JoinQuery<>(rawData, decoder, rightRaw, rightDecoder);
-        if (predicate != null) {
-            QueryPredicate<T> p = predicate;
-            jq.where(p::test);
-        }
-        return jq;
+        return predicate != null ? jq.where(predicate::test) : jq;
     }
 
     /**
@@ -290,8 +307,9 @@ public final class SingleBlockQuery<T> {
         if (ordering != null) s = s.sorted(ordering);
         s = applyPagination(s);
 
-        // Pre-size hint when we can cheaply estimate
-        int cap = (predicate == null && ordering == null)
+        // Ordering does not affect cardinality, so the size hint is valid whenever there
+        // is no predicate (predicate == null means no filtering, count is deterministic).
+        int cap = (predicate == null)
                 ? Math.max(0, Math.min(rawData.size() - offset,
                         limit == Integer.MAX_VALUE ? rawData.size() : limit))
                 : 16;

@@ -33,9 +33,8 @@ final class JoinEngine {
             Predicate<L> leftFilter,
             BiFunction<L, R, S> selector) {
 
-        // Build phase: pre-sized using long arithmetic to avoid overflow
-        long rawCapacity = (long) right.size() + (right.size() / 2) + 1;
-        int capacity = (int) Math.min(rawCapacity, Integer.MAX_VALUE);
+        // Capacity that avoids a resize: n / loadFactor (0.75) + 1, clamped to int range.
+        int capacity = (int) Math.min((long)(right.size() / 0.75f) + 1, Integer.MAX_VALUE);
         HashMap<Object, List<R>> index = new HashMap<>(capacity);
         for (R r : right) {
             Object k = rightKey.apply(r);

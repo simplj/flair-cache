@@ -90,12 +90,15 @@ public final class QueryEngine {
      * documentation label only; the single registered source is always used.</p>
      *
      * @param name    data source name (looked up in the registry, or ignored in single mode)
-     * @param type    target type used for generic inference
+     * @param type    used only for generic type inference at compile time — has no runtime
+     *                effect and is not stored. For runtime type validation use
+     *                {@link Decoder#typed(Class)} as the decoder instead of this parameter.
      * @param decoder converts raw source values to type {@code T};
      *                use {@link Decoder#identity()} for already-typed maps or
      *                {@link Decoder#typed(Class)} for safer type checking
      */
     public <T> SingleBlockQuery<T> from(String name, Class<T> type, Decoder<T> decoder) {
+        if (decoder == null) throw new IllegalArgumentException("decoder must not be null");
         String key = singleMode ? SINGLE_SOURCE_KEY : name;
         Collection<Object> data = registry.getCollection(key);
         return new SingleBlockQuery<>(singleMode ? null : registry, data, decoder, PoolHolder.INSTANCE);

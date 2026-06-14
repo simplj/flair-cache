@@ -28,8 +28,12 @@ final class LocalStore {
     private final HybridLogicalClock hlc;
     private final EvictionPolicy     policy;
     private final int                maxEntries; // 0 = unlimited
-    // CopyOnWriteArrayList: addListener() may race with sweep-thread calling notifyExpire()
-    private final List<StoreListener> listeners = new CopyOnWriteArrayList<>();
+    // CopyOnWriteArrayList: each list may race with the sweep thread (notifyExpire) or
+    // with concurrent puts (notifyPut/notifyEvict) while addXxxListener() is called.
+    private final List<PutListener>    putListeners    = new CopyOnWriteArrayList<>();
+    private final List<DeleteListener> deleteListeners = new CopyOnWriteArrayList<>();
+    private final List<ExpireListener> expireListeners = new CopyOnWriteArrayList<>();
+    private final List<EvictListener>  evictListeners  = new CopyOnWriteArrayList<>();
 
     private final LongAdder hits        = new LongAdder();
     private final LongAdder misses      = new LongAdder();
@@ -43,9 +47,10 @@ final class LocalStore {
         this.maxEntries = maxEntries;
     }
 
-    void addListener(StoreListener listener) {
-        listeners.add(listener);
-    }
+    void addPutListener(PutListener listener)       { putListeners.add(listener); }
+    void addDeleteListener(DeleteListener listener) { deleteListeners.add(listener); }
+    void addExpireListener(ExpireListener listener) { expireListeners.add(listener); }
+    void addEvictListener(EvictListener listener)   { evictListeners.add(listener); }
 
     // ── Write path ──────────────────────────────────────────────────────────
 
@@ -151,6 +156,10 @@ final class LocalStore {
         hlc.update(remote);
     }
 
+    HLCTimestamp hlcNow() {
+        return hlc.now();
+    }
+
     // ── Expiry sweep (called by ExpiryManager on flaircache-expiry-sweep) ───
 
     void sweepExpired(long nowMs) {
@@ -199,27 +208,28 @@ final class LocalStore {
 
     // ── Listener dispatch ────────────────────────────────────────────────────
     // Per-listener try/catch: one bad listener must not silently drop events for subsequent ones.
+    // Each notify method iterates only the listeners registered for that specific event type.
 
     private void notifyPut(byte[] key, CacheEntry entry) {
-        for (StoreListener l : listeners) {
+        for (PutListener l : putListeners) {
             try { l.onPut(key, entry); } catch (Exception ex) { log.log(Level.WARNING, "onPut listener threw", ex); }
         }
     }
 
     private void notifyDelete(byte[] key, CacheEntry entry) {
-        for (StoreListener l : listeners) {
+        for (DeleteListener l : deleteListeners) {
             try { l.onDelete(key, entry); } catch (Exception ex) { log.log(Level.WARNING, "onDelete listener threw", ex); }
         }
     }
 
     private void notifyExpire(byte[] key, CacheEntry entry) {
-        for (StoreListener l : listeners) {
+        for (ExpireListener l : expireListeners) {
             try { l.onExpire(key, entry); } catch (Exception ex) { log.log(Level.WARNING, "onExpire listener threw", ex); }
         }
     }
 
     private void notifyEvict(byte[] key, CacheEntry entry) {
-        for (StoreListener l : listeners) {
+        for (EvictListener l : evictListeners) {
             try { l.onEvict(key, entry); } catch (Exception ex) { log.log(Level.WARNING, "onEvict listener threw", ex); }
         }
     }

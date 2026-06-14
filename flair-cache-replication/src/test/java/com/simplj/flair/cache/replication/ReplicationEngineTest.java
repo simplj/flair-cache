@@ -336,6 +336,195 @@ class ReplicationEngineTest {
         assertEquals(ConsistencyMode.EVENTUAL, received.get().mode());
     }
 
+    // ── attachBlock: outgoing replication wired automatically ─────────────────
+
+    @Test
+    void attachBlock_local_put_replicates_to_peer() throws Exception {
+        // Verifies that CacheBlock.put() on node A automatically replicates to node B
+        // after attachBlock() is called — no manual replicate() call needed.
+        blockA = block("items");
+        blockB = block("items");
+
+        UUID idA = UUID.randomUUID();
+        UUID idB = UUID.randomUUID();
+
+        ReplicationEngine.Builder ebA = ReplicationEngine.builder()
+                .localNodeId(idA).ackTimeoutMs(5_000);
+        serverA = TcpServer.builder().port(0).handler(ebA.frameHandler()).build();
+        gossipA = gossip(idA);
+        engineA = ebA.transport(serverA).cluster(gossipA).build();
+        serverA.start();
+        engineA.start();
+        engineA.attachBlock("items", blockA, ConsistencyMode.EVENTUAL);
+
+        ReplicationEngine.Builder ebB = ReplicationEngine.builder()
+                .localNodeId(idB).ackTimeoutMs(5_000);
+        serverB = TcpServer.builder().port(0).handler(ebB.frameHandler()).build();
+        gossipB = gossip(idB);
+        engineB = ebB.transport(serverB).cluster(gossipB).build();
+        serverB.start();
+        engineB.start();
+        engineB.attachBlock("items", blockB, ConsistencyMode.EVENTUAL);
+
+        wire(engineA, idB, serverB.localPort());
+        Thread.sleep(600); // let the connection establish
+
+        // A writes locally — the StoreListener registered by attachBlock must replicate it.
+        blockA.put("hello", "world".getBytes());
+
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (blockB.get("hello") == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertNotNull(blockB.get("hello"),
+                "B must receive the entry that A wrote via put()");
+    }
+
+    @Test
+    void attachBlock_incoming_put_not_re_replicated() throws Exception {
+        // Verifies that when B applies A's replication frame (via putRaw), B's StoreListener
+        // does NOT re-replicate back to A (no infinite loop / extra frames).
+        blockA = block("items");
+        blockB = block("items");
+
+        UUID idA = UUID.randomUUID();
+        UUID idB = UUID.randomUUID();
+
+        ReplicationEngine.Builder ebA = ReplicationEngine.builder()
+                .localNodeId(idA).ackTimeoutMs(5_000);
+        serverA = TcpServer.builder().port(0).handler(ebA.frameHandler()).build();
+        gossipA = gossip(idA);
+        engineA = ebA.transport(serverA).cluster(gossipA).build();
+        serverA.start();
+        engineA.start();
+        engineA.attachBlock("items", blockA, ConsistencyMode.EVENTUAL);
+
+        ReplicationEngine.Builder ebB = ReplicationEngine.builder()
+                .localNodeId(idB).ackTimeoutMs(5_000);
+        serverB = TcpServer.builder().port(0).handler(ebB.frameHandler()).build();
+        gossipB = gossip(idB);
+        engineB = ebB.transport(serverB).cluster(gossipB).build();
+        serverB.start();
+        engineB.start();
+        engineB.attachBlock("items", blockB, ConsistencyMode.EVENTUAL);
+
+        // Wire both directions so any re-replication from B would reach A.
+        wire(engineA, idB, serverB.localPort());
+        wire(engineB, idA, serverA.localPort());
+        Thread.sleep(700);
+
+        // A writes one entry. It replicates to B. If B re-replicates, A would get a second write.
+        blockA.put("key", "val".getBytes());
+
+        // Wait for B to receive the entry before checking A's store size.
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (blockB.get("key") == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertNotNull(blockB.get("key"), "B must have received the entry from A");
+
+        // Give any spurious re-replication a moment to arrive, then assert A has exactly 1 entry.
+        Thread.sleep(200);
+        assertEquals(1, blockA.stats().size(),
+                "A must have exactly 1 entry — B must not re-replicate back to A");
+    }
+
+    @Test
+    void attachBlock_bidirectional_replication() throws Exception {
+        // The core end-to-end test: A puts, assert on B; B puts, assert on A.
+        blockA = block("items");
+        blockB = block("items");
+
+        UUID idA = UUID.randomUUID();
+        UUID idB = UUID.randomUUID();
+
+        ReplicationEngine.Builder ebA = ReplicationEngine.builder()
+                .localNodeId(idA).ackTimeoutMs(5_000);
+        serverA = TcpServer.builder().port(0).handler(ebA.frameHandler()).build();
+        gossipA = gossip(idA);
+        engineA = ebA.transport(serverA).cluster(gossipA).build();
+        serverA.start();
+        engineA.start();
+        engineA.attachBlock("items", blockA, ConsistencyMode.EVENTUAL);
+
+        ReplicationEngine.Builder ebB = ReplicationEngine.builder()
+                .localNodeId(idB).ackTimeoutMs(5_000);
+        serverB = TcpServer.builder().port(0).handler(ebB.frameHandler()).build();
+        gossipB = gossip(idB);
+        engineB = ebB.transport(serverB).cluster(gossipB).build();
+        serverB.start();
+        engineB.start();
+        engineB.attachBlock("items", blockB, ConsistencyMode.EVENTUAL);
+
+        // Wire both directions: A→B and B→A.
+        wire(engineA, idB, serverB.localPort());
+        wire(engineB, idA, serverA.localPort());
+        Thread.sleep(700);
+
+        // A puts "from-a" → must appear on B.
+        blockA.put("from-a", "value-a".getBytes());
+
+        // B puts "from-b" → must appear on A.
+        blockB.put("from-b", "value-b".getBytes());
+
+        long deadline = System.currentTimeMillis() + 5_000;
+        while ((blockB.get("from-a") == null || blockA.get("from-b") == null)
+                && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+
+        assertNotNull(blockB.get("from-a"), "B must receive A's entry");
+        assertNotNull(blockA.get("from-b"), "A must receive B's entry");
+    }
+
+    @Test
+    void attachBlock_delete_replicates_to_peer() throws Exception {
+        // Verifies that CacheBlock.delete() on node A automatically replicates to node B.
+        blockA = block("items");
+        blockB = block("items");
+
+        UUID idA = UUID.randomUUID();
+        UUID idB = UUID.randomUUID();
+
+        ReplicationEngine.Builder ebA = ReplicationEngine.builder()
+                .localNodeId(idA).ackTimeoutMs(5_000);
+        serverA = TcpServer.builder().port(0).handler(ebA.frameHandler()).build();
+        gossipA = gossip(idA);
+        engineA = ebA.transport(serverA).cluster(gossipA).build();
+        serverA.start();
+        engineA.start();
+        engineA.attachBlock("items", blockA, ConsistencyMode.EVENTUAL);
+
+        ReplicationEngine.Builder ebB = ReplicationEngine.builder()
+                .localNodeId(idB).ackTimeoutMs(5_000);
+        serverB = TcpServer.builder().port(0).handler(ebB.frameHandler()).build();
+        gossipB = gossip(idB);
+        engineB = ebB.transport(serverB).cluster(gossipB).build();
+        serverB.start();
+        engineB.start();
+        engineB.attachBlock("items", blockB, ConsistencyMode.EVENTUAL);
+
+        wire(engineA, idB, serverB.localPort());
+        Thread.sleep(600);
+
+        // Seed the key on both nodes.
+        blockA.put("bye", "val".getBytes());
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (blockB.get("bye") == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertNotNull(blockB.get("bye"), "pre-condition: B must have the key");
+
+        // A deletes — must replicate to B.
+        blockA.delete("bye");
+
+        deadline = System.currentTimeMillis() + 5_000;
+        while (blockB.get("bye") != null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertNull(blockB.get("bye"), "B must not have the key after A's delete replicates");
+    }
+
     // ── AckTracker sweep ──────────────────────────────────────────────────────
 
     @Test

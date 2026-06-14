@@ -1,8 +1,8 @@
 package com.simplj.flair.cache.dsl;
 
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Named registry of in-memory data sources. Register any {@link Map} or
@@ -12,15 +12,23 @@ import java.util.Map;
  * <p>DSL has no knowledge of CacheBlock or any FLAIR store type.
  * The caller supplies their own Map or Collection.</p>
  *
- * <p>{@link #register} fails fast on duplicate names. Use {@link #registerOrReplace}
- * when intentionally refreshing a source (e.g., live data reload).</p>
+ * <p>{@link #register} is fully atomic with respect to duplicate-name detection —
+ * two concurrent callers racing to register the same name are guaranteed that
+ * exactly one succeeds and the other receives {@link IllegalStateException}.</p>
+ *
+ * <p>{@link #registerOrReplace} is individually atomic (the put itself is atomic),
+ * but a read-then-replace sequence across two calls is not; external synchronisation
+ * is required if that level of atomicity is needed.</p>
+ *
+ * <p>Queries executed concurrently against a stable registry (no concurrent registrations
+ * in flight) are fully thread-safe.</p>
  */
 public final class DataRegistry {
 
-    private final Map<String, Collection<?>> sources = new HashMap<>();
+    private final ConcurrentHashMap<String, Collection<?>> sources = new ConcurrentHashMap<>();
 
     /**
-     * Registers a map's values under {@code name}. Keys are discarded;
+     * Atomically registers a map's values under {@code name}. Keys are discarded;
      * only the value set is exposed to the query engine.
      *
      * <p><b>Live-view semantics:</b> the registry holds a live view of the map's
@@ -29,29 +37,35 @@ public final class DataRegistry {
      * semantics are required: {@code register(name, new HashMap<>(data))}.</p>
      *
      * @throws IllegalStateException if a source is already registered under {@code name};
-     *         use {@link #registerOrReplace} for intentional replacement
+     *         use {@link #registerOrReplace} for intentional replacement.
+     *         Guaranteed atomic — concurrent callers on the same name will not both succeed.
      */
     public <K, V> DataRegistry register(String name, Map<K, V> data) {
-        if (sources.containsKey(name)) {
+        if (name == null) throw new IllegalArgumentException("name must not be null");
+        if (data == null) throw new IllegalArgumentException("data must not be null");
+        Collection<?> prev = sources.putIfAbsent(name, data.values());
+        if (prev != null) {
             throw new IllegalStateException(
                     "A source is already registered as: '" + name + "' — use registerOrReplace() to overwrite");
         }
-        sources.put(name, data.values());
         return this;
     }
 
     /**
-     * Registers a collection directly under {@code name}.
+     * Atomically registers a collection directly under {@code name}.
      *
      * @throws IllegalStateException if a source is already registered under {@code name};
-     *         use {@link #registerOrReplace} for intentional replacement
+     *         use {@link #registerOrReplace} for intentional replacement.
+     *         Guaranteed atomic — concurrent callers on the same name will not both succeed.
      */
     public <V> DataRegistry register(String name, Collection<V> data) {
-        if (sources.containsKey(name)) {
+        if (name == null) throw new IllegalArgumentException("name must not be null");
+        if (data == null) throw new IllegalArgumentException("data must not be null");
+        Collection<?> prev = sources.putIfAbsent(name, data);
+        if (prev != null) {
             throw new IllegalStateException(
                     "A source is already registered as: '" + name + "' — use registerOrReplace() to overwrite");
         }
-        sources.put(name, data);
         return this;
     }
 
@@ -61,6 +75,8 @@ public final class DataRegistry {
      * Use for intentional live data reloads.
      */
     public <K, V> DataRegistry registerOrReplace(String name, Map<K, V> data) {
+        if (name == null) throw new IllegalArgumentException("name must not be null");
+        if (data == null) throw new IllegalArgumentException("data must not be null");
         sources.put(name, data.values());
         return this;
     }
@@ -71,6 +87,8 @@ public final class DataRegistry {
      * Use for intentional live data reloads.
      */
     public <V> DataRegistry registerOrReplace(String name, Collection<V> data) {
+        if (name == null) throw new IllegalArgumentException("name must not be null");
+        if (data == null) throw new IllegalArgumentException("data must not be null");
         sources.put(name, data);
         return this;
     }

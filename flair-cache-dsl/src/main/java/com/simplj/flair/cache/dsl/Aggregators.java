@@ -31,10 +31,26 @@ public final class Aggregators {
         return stream -> stream.mapToDouble(field).max().orElse(Double.NaN);
     }
 
+    /**
+     * Returns the smallest value of {@code field} across the group.
+     *
+     * <p>Returns {@code null} when the input stream is empty. This is unreachable via
+     * {@link GroupByQuery#aggregate} (grouping never produces empty partitions), but
+     * callers wiring this aggregator into a custom pipeline should guard for {@code null}
+     * when passing an empty stream directly.</p>
+     */
     public static <T, R extends Comparable<R>> Aggregator<T, R> minBy(Function<T, R> field) {
         return stream -> stream.map(field).min(Comparator.naturalOrder()).orElse(null);
     }
 
+    /**
+     * Returns the largest value of {@code field} across the group.
+     *
+     * <p>Returns {@code null} when the input stream is empty. This is unreachable via
+     * {@link GroupByQuery#aggregate} (grouping never produces empty partitions), but
+     * callers wiring this aggregator into a custom pipeline should guard for {@code null}
+     * when passing an empty stream directly.</p>
+     */
     public static <T, R extends Comparable<R>> Aggregator<T, R> maxBy(Function<T, R> field) {
         return stream -> stream.map(field).max(Comparator.naturalOrder()).orElse(null);
     }

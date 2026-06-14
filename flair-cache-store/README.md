@@ -14,7 +14,7 @@ Part of the [FLAIR Cache](../README.md) library — but fully usable as a standa
 - A raw `LocalStore` backed by `ConcurrentHashMap` for lock-free reads
 - Background TTL sweep on a dedicated daemon thread
 - Approximate O(1) eviction for LRU, LFU, and size-based policies
-- `StoreListener` hooks so the replication and watch layers can observe every mutation
+- Typed listener hooks (`PutListener`, `DeleteListener`, `ExpireListener`, `EvictListener`) so the replication and watch layers can observe every mutation
 - Raw `putRaw` / `getRaw` access for the replication layer to bypass type codecs
 
 Reads are designed to be sub-200ns: a pure `ConcurrentHashMap.get()` with no locks, no I/O, and no serialization on the hot path.
@@ -184,51 +184,55 @@ CacheEntry getRaw(byte[] key)                    // bypass codec and expiry chec
 
 ### Listener registration
 
+Each event type has its own `@FunctionalInterface` and its own registration method. Register only the events you care about — unregistered event types incur zero overhead.
+
 ```java
-void addListener(StoreListener listener)
+void addPutListener(PutListener listener)       // fires on put() and putRaw()
+void addDeleteListener(DeleteListener listener) // fires on delete() when key was present
+void addExpireListener(ExpireListener listener) // fires on lazy expiry (get/contains) or sweep
+void addEvictListener(EvictListener listener)   // fires on capacity eviction (LRU / LFU / SIZE_BASED)
 ```
 
 ---
 
-## `StoreListener`
+## Listener types
 
-```java
-public interface StoreListener {
-    void onPut(byte[] key, CacheEntry entry);    // fires on put() and putRaw()
-    void onDelete(byte[] key, CacheEntry entry); // fires on delete() when key was present
-    void onExpire(byte[] key, CacheEntry entry); // fires on lazy expiry (get/contains) or sweep
+| Interface | When fired |
+|---|---|
+| `PutListener` | After every `put()` or `putRaw()` |
+| `DeleteListener` | After `delete()` when the key was present; silent deletes of absent keys do not fire |
+| `ExpireListener` | On TTL expiry — either lazy (inside `get()` / `contains()`) or from the background sweep |
+| `EvictListener` | After capacity eviction; always fires *after* `PutListener` for the same `put()` call |
 
-    default void onEvict(byte[] key, CacheEntry entry) {} // fires on capacity eviction
-}
-```
-
-**Contract:**
+**Contract (all listener types):**
 - The `key` byte array is the live backing array of the internal map key. **Do not mutate it** — doing so corrupts future key equality checks in the store.
-- Callbacks on `put()` and `delete()` are invoked on the calling thread. Callbacks on sweep expiry are invoked on `flaircache-expiry-sweep`.
-- **Do not block inside a callback.** The sweep thread and the put caller are blocked for the duration of all listener dispatches.
-- A listener that throws does not prevent subsequent listeners from receiving the event. Each listener call is wrapped in an individual `try/catch` — exceptions are logged at `WARNING` level.
-- Multiple listeners may be registered. All receive every event, in registration order.
+- `PutListener`, `DeleteListener`, and `EvictListener` are invoked on the calling thread. `ExpireListener` is invoked on `flaircache-expiry-sweep` when fired from the background sweep, or on the calling thread when fired from lazy expiry.
+- **Do not block inside a callback.** The put caller and the sweep thread are blocked for the duration of all listener dispatches.
+- A listener that throws does not prevent subsequent listeners from receiving the event. Each call is wrapped in an individual `try/catch` — exceptions are logged at `WARNING` level.
+- Multiple listeners may be registered per event type. All receive events in registration order.
 
 ### Event ordering
 
-When a `put()` triggers an eviction, listeners always see `onPut` before `onEvict`. The newly inserted entry is fully committed to the store before the eviction candidate is removed.
+When a `put()` triggers an eviction, the `PutListener` always fires before the `EvictListener`. The new entry is fully committed to the store before the eviction candidate is removed.
 
-### Example: reactive watch
+### Example: selective subscription
 
 ```java
-products.addListener(new StoreListener() {
-    @Override
-    public void onPut(byte[] key, CacheEntry entry) {
-        // new or updated product — notify downstream
-    }
-    @Override
-    public void onDelete(byte[] key, CacheEntry entry) {
-        // product removed — invalidate dependent caches
-    }
-    @Override
-    public void onExpire(byte[] key, CacheEntry entry) {
-        // product TTL elapsed — could trigger a refresh
-    }
+// Only register for the events you actually need — no empty stubs required.
+
+// Replication layer: replicate writes and deletes
+products.addPutListener((key, entry) -> replication.enqueue(PUT, key, entry));
+products.addDeleteListener((key, entry) -> replication.enqueue(DELETE, key, entry));
+
+// Watch layer: notify subscribers
+products.addPutListener((key, entry) -> watchRegistry.dispatch(PUT, key, entry));
+products.addDeleteListener((key, entry) -> watchRegistry.dispatch(DELETE, key, entry));
+products.addExpireListener((key, entry) -> watchRegistry.dispatch(EXPIRE, key, entry));
+
+// Evict callback: user-facing notification
+products.addEvictListener((key, entry) -> {
+    String k = keyCodec.deserialize(ByteBuffer.wrap(key));
+    onEvictedCallback.accept(k);
 });
 ```
 
@@ -298,7 +302,10 @@ LocalStore  (package-private, untyped)
 ├── ConcurrentHashMap<ByteArrayKey, CacheEntry>   — the actual store
 │     ByteArrayKey: byte[] wrapper with pre-computed Arrays.hashCode for fast map ops
 │
-├── CopyOnWriteArrayList<StoreListener>           — listener fan-out; safe under concurrent addListener
+├── CopyOnWriteArrayList<PutListener>             — one list per event type; each notify method
+├── CopyOnWriteArrayList<DeleteListener>          —   iterates only the listeners registered for
+├── CopyOnWriteArrayList<ExpireListener>          —   that specific event — no empty-impl overhead
+├── CopyOnWriteArrayList<EvictListener>           —   safe under concurrent addXxxListener()
 │
 ├── LongAdder × 4                                  — hits, misses, evictions, expirations
 │
@@ -339,7 +346,7 @@ No other dependencies. No Guava, no Caffeine, no external libraries of any kind.
 
 ## What this module does not do
 
-- **No replication.** Replication is handled by `flair-cache-replication`, which attaches a `StoreListener` to observe mutations and fan them out over TCP.
+- **No replication.** Replication is handled by `flair-cache-replication`, which registers `PutListener` and `DeleteListener` on each block to observe mutations and fan them out over TCP.
 - **No peer discovery.** That is `flair-cache-gossip` (SWIM/UDP).
 - **No query DSL.** `flair-cache-dsl` accepts any `Map<K,V>` — it does not import store types.
 - **No JMX metrics.** `flair-cache-metrics` wraps this module's `CacheStats` and publishes via MBeans.

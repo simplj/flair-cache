@@ -1103,6 +1103,133 @@ class QueryEngineTest {
         assertEquals("o1", result.get(0).orderId());
     }
 
+    // ── hash join: duplicate right-side keys ─────────────────────────────────
+
+    @Test
+    void hashJoinDuplicateRightKeysProducesOneRowPerMatch() {
+        // Right side: two discount codes both applicable to "books"
+        Map<String, String> discountMap = new LinkedHashMap<>();
+        discountMap.put("d1", "books");
+        discountMap.put("d2", "books");
+
+        DataRegistry reg = new DataRegistry()
+                .register("products",  products)
+                .register("discounts", discountMap);
+
+        List<String> result = QueryEngine.over(reg)
+                .from("products", Product.class, Decoder.identity())
+                .where(p -> p.category().equals("books"))
+                .<String>join("discounts", String.class, Decoder.identity())
+                .on(Product::category, s -> s)
+                .select((p, d) -> p.id() + "+" + d)
+                .fetch();
+
+        // 2 book products × 2 discount entries = 4 output rows
+        assertEquals(4, result.size());
+        assertTrue(result.stream().allMatch(r -> r.startsWith("p3+") || r.startsWith("p4+")));
+    }
+
+    @Test
+    void hashJoinSingleLeftMultipleRightMatchesAllRight() {
+        // One left entry matching two right entries — verifies multi-value index path
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("t1", "electronics");
+        tags.put("t2", "electronics");
+        tags.put("t3", "books");       // not electronics — should not match
+
+        DataRegistry reg = new DataRegistry()
+                .register("products", products)
+                .register("tags",     tags);
+
+        List<String> result = QueryEngine.over(reg)
+                .from("products", Product.class, Decoder.identity())
+                .where(p -> p.id().equals("p1"))           // single electronics product
+                .<String>join("tags", String.class, Decoder.identity())
+                .on(Product::category, s -> s)
+                .select((p, t) -> p.id() + ":" + t)
+                .fetch();
+
+        // p1 matches both t1 and t2 (both "electronics") but not t3
+        assertEquals(2, result.size());
+        assertTrue(result.stream().allMatch(r -> r.equals("p1:electronics")));
+    }
+
+    // ── null parameter guards ─────────────────────────────────────────────────
+
+    @Test
+    void whereNullPredicateThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("products", Product.class, Decoder.identity()).where(null));
+    }
+
+    @Test
+    void andNullPredicateThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("products", Product.class, Decoder.identity())
+                      .where(p -> true)
+                      .and(null));
+    }
+
+    @Test
+    void orNullPredicateThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("products", Product.class, Decoder.identity()).or(null));
+    }
+
+    @Test
+    void joinOnNullBiPredicateThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("orders", Purchase.class, Decoder.identity())
+                      .<Customer>join("customers", Customer.class, Decoder.identity())
+                      .on((java.util.function.BiPredicate<Purchase, Customer>) null));
+    }
+
+    @Test
+    void joinOnNullLeftKeyThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("orders", Purchase.class, Decoder.identity())
+                      .<Customer>join("customers", Customer.class, Decoder.identity())
+                      .on(null, Customer::id));
+    }
+
+    @Test
+    void joinOnNullRightKeyThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("orders", Purchase.class, Decoder.identity())
+                      .<Customer>join("customers", Customer.class, Decoder.identity())
+                      .on(Purchase::customerId, null));
+    }
+
+    @Test
+    void fromNullDecoderThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("products", Product.class, null));
+    }
+
+    @Test
+    void dataRegistryRegisterNullNameThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new DataRegistry().register(null, products));
+    }
+
+    @Test
+    void dataRegistryRegisterNullDataThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new DataRegistry().register("x", (Map<?, ?>) null));
+    }
+
+    @Test
+    void dataRegistryRegisterNullCollectionThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new DataRegistry().register("x", (java.util.List<?>) null));
+    }
+
+    @Test
+    void dataRegistryRegisterOrReplaceNullNameThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new DataRegistry().registerOrReplace(null, products));
+    }
+
     // ── findAny: ignores pagination ───────────────────────────────────────────
 
     @Test
@@ -1174,6 +1301,174 @@ class QueryEngineTest {
 
         assertEquals(2, result.size());
         assertTrue(result.stream().allMatch(p -> p.category().equals("books")));
+    }
+
+    // ── orderBy NullOrdering ──────────────────────────────────────────────────
+
+    @Test
+    void orderByDefaultNullOrdering_nullsFirst_onAsc() {
+        Map<String, Product> withNull = new LinkedHashMap<>(products);
+        withNull.put("p0", new Product("p0", null, 50.0, 5));
+
+        DataRegistry reg = new DataRegistry().register("items", withNull);
+        List<Product> result = QueryEngine.over(reg)
+                .from("items", Product.class, Decoder.identity())
+                .orderBy(Product::category, Order.ASC)
+                .fetch();
+
+        assertNull(result.get(0).category());  // null is minimum → first in ASC
+    }
+
+    @Test
+    void orderByDefaultNullOrdering_nullsLast_onDesc() {
+        Map<String, Product> withNull = new LinkedHashMap<>(products);
+        withNull.put("p0", new Product("p0", null, 50.0, 5));
+
+        DataRegistry reg = new DataRegistry().register("items", withNull);
+        List<Product> result = QueryEngine.over(reg)
+                .from("items", Product.class, Decoder.identity())
+                .orderBy(Product::category, Order.DESC)
+                .fetch();
+
+        assertNull(result.get(result.size() - 1).category());  // null is minimum → last in DESC
+    }
+
+    @Test
+    void orderByExplicitNullsFirst() {
+        Map<String, Product> withNull = new LinkedHashMap<>(products);
+        withNull.put("p0", new Product("p0", null, 50.0, 5));
+
+        DataRegistry reg = new DataRegistry().register("items", withNull);
+        List<Product> result = QueryEngine.over(reg)
+                .from("items", Product.class, Decoder.identity())
+                .orderBy(Product::category, Order.ASC, NullOrdering.NULLS_FIRST)
+                .fetch();
+
+        assertNull(result.get(0).category());
+    }
+
+    @Test
+    void orderByExplicitNullsLast() {
+        Map<String, Product> withNull = new LinkedHashMap<>(products);
+        withNull.put("p0", new Product("p0", null, 50.0, 5));
+
+        DataRegistry reg = new DataRegistry().register("items", withNull);
+        List<Product> result = QueryEngine.over(reg)
+                .from("items", Product.class, Decoder.identity())
+                .orderBy(Product::category, Order.ASC, NullOrdering.NULLS_LAST)
+                .fetch();
+
+        assertNull(result.get(result.size() - 1).category());
+    }
+
+    @Test
+    void orderByNullsLastDesc_nullsAppearFirst() {
+        // NULLS_LAST + DESC → reversed(nullsLast(naturalOrder())) → nulls before any real value
+        Map<String, Product> withNull = new LinkedHashMap<>(products);
+        withNull.put("p0", new Product("p0", null, 50.0, 5));
+
+        DataRegistry reg = new DataRegistry().register("items", withNull);
+        List<Product> result = QueryEngine.over(reg)
+                .from("items", Product.class, Decoder.identity())
+                .orderBy(Product::category, Order.DESC, NullOrdering.NULLS_LAST)
+                .fetch();
+
+        assertNull(result.get(0).category());  // NULLS_LAST + DESC reversal → null first
+    }
+
+    // ── JoinQuery immutability ────────────────────────────────────────────────
+
+    @Test
+    void joinQueryWhereDoesNotMutateBase() {
+        JoinQuery<Purchase, Customer> base = engine
+                .from("orders", Purchase.class, Decoder.identity())
+                .<Customer>join("customers", Customer.class, Decoder.identity())
+                .on(Purchase::customerId, Customer::id);
+
+        List<OrderSummary> filtered = base
+                .where(o -> o.total() > 500)
+                .select((o, c) -> new OrderSummary(o.id(), c.name()))
+                .fetch();
+
+        // base is unaffected — must still return all 3 matches
+        List<OrderSummary> all = base
+                .select((o, c) -> new OrderSummary(o.id(), c.name()))
+                .fetch();
+
+        assertEquals(2, filtered.size());  // o1(600) and o3(900) only
+        assertEquals(3, all.size());       // unaffected by the filtered chain
+    }
+
+    @Test
+    void joinQueryOnDoesNotMutateBase() {
+        // Start from a base with no strategy set
+        JoinQuery<Purchase, Customer> base = engine
+                .from("orders", Purchase.class, Decoder.identity())
+                .<Customer>join("customers", Customer.class, Decoder.identity());
+
+        // Apply two independent strategies from the same base
+        List<OrderSummary> hashResult = base
+                .on(Purchase::customerId, Customer::id)
+                .select((o, c) -> new OrderSummary(o.id(), c.name()))
+                .fetch();
+
+        List<OrderSummary> loopResult = base
+                .on((o, c) -> o.customerId().equals(c.id()))
+                .select((o, c) -> new OrderSummary(o.id(), c.name()))
+                .fetch();
+
+        assertEquals(3, hashResult.size());
+        assertEquals(3, loopResult.size());
+
+        // base itself has no strategy — fetch() must still throw
+        assertThrows(IllegalStateException.class, () ->
+                base.select((o, c) -> new OrderSummary(o.id(), c.name())).fetch());
+    }
+
+    @Test
+    void joinQueryOnReplacementLeavesOriginalIntact() {
+        // Calling on() twice from the same base must not affect the first chain
+        JoinQuery<Purchase, Customer> withHash = engine
+                .from("orders", Purchase.class, Decoder.identity())
+                .<Customer>join("customers", Customer.class, Decoder.identity())
+                .on(Purchase::customerId, Customer::id);
+
+        // Derive a nested-loop version from the hash-join instance
+        JoinQuery<Purchase, Customer> withLoop = withHash
+                .on((o, c) -> o.customerId().equals(c.id()));
+
+        List<OrderSummary> fromHash = withHash
+                .select((o, c) -> new OrderSummary(o.id(), c.name()))
+                .fetch();
+
+        List<OrderSummary> fromLoop = withLoop
+                .select((o, c) -> new OrderSummary(o.id(), c.name()))
+                .fetch();
+
+        assertEquals(3, fromHash.size());
+        assertEquals(3, fromLoop.size());
+    }
+
+    @Test
+    void joinQueryWhereNullThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                engine.from("orders", Purchase.class, Decoder.identity())
+                      .<Customer>join("customers", Customer.class, Decoder.identity())
+                      .where(null));
+    }
+
+    // ── null parameter guards (additional) ───────────────────────────────────
+
+    @Test
+    void dataRegistryRegisterOrReplaceNullDataThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new DataRegistry().registerOrReplace("x", (Map<?, ?>) null));
+    }
+
+    @Test
+    void dataRegistryRegisterOrReplaceNullCollectionThrows() {
+        assertThrows(IllegalArgumentException.class, () ->
+                new DataRegistry().registerOrReplace("x", (java.util.List<?>) null));
     }
 
     // ── custom aggregator ─────────────────────────────────────────────────────

@@ -60,6 +60,45 @@ FLAIR has zero external dependencies. Everything — TCP transport, binary seria
 
 ---
 
+## ⚠️ Memory Model — Read Before Adopting
+
+FLAIR replicates the **full dataset to every node**. This is what makes reads sub-microsecond —
+but it has a direct memory cost that every team must account for before adopting FLAIR.
+
+```
+Dataset size: 500MB
+
+Without FLAIR:          With FLAIR (5 nodes):
+┌──────────────┐        ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
+│  Redis 500MB │        │500MB │ │500MB │ │500MB │ │500MB │ │500MB │
+│  (1 server)  │        │Node A│ │Node B│ │Node C│ │Node D│ │Node E│
+└──────────────┘        └──────┘ └──────┘ └──────┘ └──────┘ └──────┘
+Total: 500MB            Total: 2.5GB heap committed across all nodes
+```
+
+**What this means in practice:**
+
+- Every node must have enough JVM heap to hold the entire dataset — not just a partition of it
+- JVM GC pressure increases proportionally — large heaps with frequent object churn
+  increase GC pause risk, particularly with older GC algorithms
+- Adding more nodes does **not** reduce per-node memory — it increases total cluster memory
+- JVM heap must be sized for peak dataset size, not average — eviction helps but is not a safety net
+
+**FLAIR is the right choice when:**
+- Your dataset fits comfortably in each node's heap (rule of thumb: dataset < 20% of max heap)
+- Data changes infrequently — the read amplification benefit outweighs the memory cost
+- You are already running JVM services and heap headroom exists
+
+**Consider Redis or Hazelcast instead when:**
+- Dataset size is large relative to available heap per node
+- Dataset grows unboundedly over time
+- Memory cost per node is a hard operational constraint
+
+This is not a bug — it is a fundamental architectural tradeoff. FLAIR trades memory for
+read speed and infrastructure simplicity. Make this tradeoff consciously.
+
+---
+
 ## Features
 
 ### Core
@@ -95,8 +134,9 @@ FLAIR has zero external dependencies. Everything — TCP transport, binary seria
 
 FLAIR is built as composable standalone modules. Each module is independently useful and shippable.
 
-| Module | Artifact | Standalone purpose |
+| Module | Artifact | Purpose |
 |---|---|---|
+| **[FlairCache](flair-cache/README.md)** | **`flair-cache`** | **Single entry point — `FlairCache` facade wiring all modules together** |
 | [Serial](flair-cache-serial/README.md) | `flair-cache-serial` | Binary serialization — POJOs ↔ `ByteBuffer`, zero deps |
 | [Transport](flair-cache-transport/README.md) | `flair-cache-transport` | Non-blocking NIO TCP server + client |
 | [Gossip](flair-cache-gossip/README.md) | `flair-cache-gossip` | SWIM peer discovery + failure detection (UDP) |
@@ -105,7 +145,7 @@ FLAIR is built as composable standalone modules. Each module is independently us
 | [Replication](flair-cache-replication/README.md) | `flair-cache-replication` | TCP fanout, ACK tracking, consistency modes |
 | [Bootstrap](flair-cache-bootstrap/README.md) | `flair-cache-bootstrap` | State sync for new node join |
 | [DSL](flair-cache-dsl/README.md) | `flair-cache-dsl` | Query DSL — filter, join, aggregate over cache blocks |
-| Watch | `flair-cache-watch` | Reactivity — subscribe to cache change events |
+| [Watch](flair-cache-watch/README.md) | `flair-cache-watch` | Reactivity — subscribe to cache change events |
 | Metrics | `flair-cache-metrics` | JMX metrics and monitoring |
 
 ---
@@ -117,6 +157,9 @@ FLAIR is built as composable standalone modules. Each module is independently us
 ### Planned usage (any Java app)
 
 ```java
+// FlairCache is the single facade class from flair-cache.
+// It is the only class you need — all internal modules are wired automatically.
+
 // Non-Spring — direct instantiation
 FlairCache cache = FlairCache.builder()
     .bindPort(7890)
@@ -266,8 +309,9 @@ FLAIR is currently in active development. The library is being built module by m
 - [x] [`flair-cache-replication`](flair-cache-replication/README.md) — Replication engine
 - [x] [`flair-cache-bootstrap`](flair-cache-bootstrap/README.md) — Bootstrap sync
 - [x] [`flair-cache-dsl`](flair-cache-dsl/README.md) — Query DSL
-- [ ] `flair-cache-watch` — Watch / reactivity
+- [x] [`flair-cache-watch`](flair-cache-watch/README.md) — Watch / reactivity
 - [ ] `flair-cache-metrics` — JMX metrics
+- [ ] `flair-cache` — FlairCache facade (final assembly)
 - [ ] First stable release on Maven Central
 
 Watch / star the repository to be notified of the first release.
@@ -345,6 +389,75 @@ FLAIR uses a push-from-origin replication model: the node that writes a value fa
 
 ---
 
+## Honest Comparison — Where Others Win
+
+FLAIR is the right choice for specific scenarios, but several mature solutions outperform it in others.
+This section is intentionally blunt.
+
+### Where Redis wins over FLAIR
+
+**Write-heavy workloads**
+Redis can handle millions of writes per second from thousands of concurrent clients against a single
+server. FLAIR replicates every write to every node — under high write throughput, replication
+amplification grows linearly with cluster size. If your workload writes more than it reads, Redis
+is the better tool.
+
+**Polyglot environments**
+Redis works from any language — Python, Go, Node, Ruby, Java. FLAIR is Java-only. If your
+architecture has non-Java services that need the same cached data, Redis is the only sensible choice.
+
+**Memory cost scales with nodes, not data size**
+Redis stores data once on a dedicated server. FLAIR stores the full dataset inside every JVM's heap.
+A 500MB dataset costs 500MB × N nodes of total cluster heap — adding nodes increases total memory
+used, not reduces it. Redis Cluster shards data across nodes so each node holds only a fraction.
+See the [Memory Model](#️⃣-memory-model--read-before-adopting) section above for the full picture.
+
+**Persistence and durability**
+Redis offers RDB snapshots and AOF (append-only file) persistence. A restarted Redis node recovers
+its data from disk. A restarted FLAIR node has an empty store and must bootstrap from a live peer —
+if no live peer exists, data is permanently lost. FLAIR is a pure in-memory store with no disk
+fallback in V1.
+
+**Pub/sub and streaming**
+Redis has first-class pub/sub and Redis Streams — battle-tested, feature-rich, and polyglot.
+FLAIR's watch API is in-process and Java-only. For event streaming across services, Redis wins.
+
+**Operational maturity**
+Redis has decades of production hardening, an enormous community, rich tooling (RedisInsight,
+Redis Cluster, Sentinel), and well-understood failure modes. FLAIR is new. The operational
+playbook — how to monitor it, debug it, recover from split-brain — is yours to write.
+
+### Where Hazelcast wins over FLAIR
+
+**SQL and distributed computing**
+Hazelcast has a full distributed SQL engine, distributed compute (map-reduce style), and
+distributed data structures (queues, topics, locks). FLAIR's query DSL operates over in-memory
+collections only — it has no distributed compute layer.
+
+**Battle-tested at scale**
+Hazelcast runs in production at large-scale enterprise deployments — financial systems, telcos,
+e-commerce platforms. FLAIR is V1 software. The failure modes at 50+ node clusters, under
+sustained load, in adversarial network conditions, are not yet fully explored.
+
+**Data partitioning**
+Hazelcast can partition data across nodes — not every node holds the full dataset. For very large
+datasets, this is essential. FLAIR replicates the entire dataset to every node — memory per node
+grows with data size, not cluster size.
+
+### Where Caffeine wins over FLAIR
+
+**Pure local caching**
+If your services don't need to share data and local caching is sufficient, Caffeine is faster,
+simpler, lighter, and more mature. FLAIR's replication overhead is pointless if you don't need
+distribution.
+
+**Warm-up time**
+Caffeine has no bootstrap sync — it starts cold and warms up as entries are added. FLAIR nodes
+joining an existing cluster must receive a full state transfer before serving consistent reads.
+For very large datasets, this bootstrap can take seconds or minutes.
+
+---
+
 ## Best Fit Use Cases
 
 FLAIR is designed for specific scenarios where it genuinely excels:
@@ -356,10 +469,12 @@ FLAIR is designed for specific scenarios where it genuinely excels:
 - Spring Boot microservice architectures
 
 **Not the right tool**
-- Write-heavy, high-churn data (thousands of mutations per second per key)
-- Polyglot environments (non-Java services need the same data)
-- Primary database replacement for mutable user data requiring ACID guarantees
-- Datasets larger than available JVM heap across all nodes
+- Write-heavy, high-churn data — use Redis
+- Polyglot environments (non-Java services) — use Redis
+- Datasets that don't fit comfortably in each node's JVM heap — use Redis Cluster or Hazelcast
+- Pure local caching with no distribution need — use Caffeine
+- Primary database replacement requiring ACID guarantees — use a database
+- Operational simplicity over raw performance — use Redis
 
 ---
 
