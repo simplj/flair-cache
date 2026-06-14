@@ -59,8 +59,15 @@ final class IncomingHandler implements FrameHandler {
                     winner = engine.conflictResolver().resolve(existing, decoded.entry());
                 }
                 // Write if there was no existing entry, or if the resolver chose not to keep existing.
+                // Mark the calling thread as performing an incoming apply so that the PutListener
+                // registered via attachBlock does not re-replicate the write back to peers.
                 if (existing == null || winner != existing) {
-                    block.putRaw(decoded.key(), winner);
+                    ReplicationEngine.INCOMING.set(true);
+                    try {
+                        block.putRaw(decoded.key(), winner);
+                    } finally {
+                        ReplicationEngine.INCOMING.set(false);
+                    }
                 }
                 applied = true;
             }
@@ -97,9 +104,16 @@ final class IncomingHandler implements FrameHandler {
         if (lookup != null) {
             CacheBlock<?, ?> block = lookup.apply(decoded.blockName());
             if (block != null) {
-                // Sync HLC with the remote clock before applying — spec requires it for all frames
+                // Sync HLC with the remote clock before applying — spec requires it for all frames.
+                // Mark the calling thread so that the DeleteListener registered via attachBlock does
+                // not re-replicate this delete back to peers.
                 block.updateClock(decoded.hlc());
-                block.deleteRaw(decoded.key());
+                ReplicationEngine.INCOMING.set(true);
+                try {
+                    block.deleteRaw(decoded.key());
+                } finally {
+                    ReplicationEngine.INCOMING.set(false);
+                }
                 applied = true;
             }
         }

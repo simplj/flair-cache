@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.store;
 
+import com.simplj.flair.cache.hlc.HLCTimestamp;
 import com.simplj.flair.cache.hlc.HybridLogicalClock;
 import com.simplj.flair.cache.serial.Codec;
 
@@ -48,20 +49,15 @@ public final class CacheBlock<K, V> implements AutoCloseable {
 
         if (b.userOnEvict != null) {
             BiConsumer<K, V> cb = b.userOnEvict;
-            store.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry) {}
-                @Override public void onDelete(byte[] key, CacheEntry entry) {}
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-                @Override public void onEvict(byte[] key, CacheEntry entry) {
-                    try {
-                        K k = keyCodec.deserialize(ByteBuffer.wrap(key));
-                        V v = entry.value() != null
-                                ? valueCodec.deserialize(ByteBuffer.wrap(entry.value()))
-                                : null;
-                        cb.accept(k, v);
-                    } catch (Exception ex) {
-                        log.log(Level.WARNING, "onEvict callback threw", ex);
-                    }
+            store.addEvictListener((key, entry) -> {
+                try {
+                    K k = keyCodec.deserialize(ByteBuffer.wrap(key));
+                    V v = entry.value() != null
+                            ? valueCodec.deserialize(ByteBuffer.wrap(entry.value()))
+                            : null;
+                    cb.accept(k, v);
+                } catch (Exception ex) {
+                    log.log(Level.WARNING, "onEvict callback threw", ex);
                 }
             });
         }
@@ -182,16 +178,36 @@ public final class CacheBlock<K, V> implements AutoCloseable {
         store.delete(new ByteArrayKey(key));
     }
 
-    public void updateClock(com.simplj.flair.cache.hlc.HLCTimestamp remote) {
+    public void updateClock(HLCTimestamp remote) {
         Objects.requireNonNull(remote, "remote must not be null");
         store.updateClock(remote);
     }
 
+    /** Returns the current HLC timestamp, advancing the clock. Used by the replication layer for DELETE events. */
+    public HLCTimestamp hlcNow() {
+        return store.hlcNow();
+    }
+
     // ── Listener registration (for replication and watch layers) ────────────
 
-    public void addListener(StoreListener listener) {
+    public void addPutListener(PutListener listener) {
         Objects.requireNonNull(listener, "listener must not be null");
-        store.addListener(listener);
+        store.addPutListener(listener);
+    }
+
+    public void addDeleteListener(DeleteListener listener) {
+        Objects.requireNonNull(listener, "listener must not be null");
+        store.addDeleteListener(listener);
+    }
+
+    public void addExpireListener(ExpireListener listener) {
+        Objects.requireNonNull(listener, "listener must not be null");
+        store.addExpireListener(listener);
+    }
+
+    public void addEvictListener(EvictListener listener) {
+        Objects.requireNonNull(listener, "listener must not be null");
+        store.addEvictListener(listener);
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────

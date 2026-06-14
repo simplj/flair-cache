@@ -35,7 +35,7 @@ final class ExpiryManager {
 
     void stop() {
         scheduler.shutdown();
-        // If stop() is called from within a sweep callback (e.g. a StoreListener.onExpire fires
+        // If stop() is called from within a sweep callback (e.g. an ExpireListener fires
         // cacheBlock.close()), awaitTermination() would deadlock — the sweep thread waiting for itself.
         // Detect by name; the thread name is stable (set by FlairCacheThreadFactory).
         if (Thread.currentThread().getName().startsWith("flaircache-expiry-sweep")) {

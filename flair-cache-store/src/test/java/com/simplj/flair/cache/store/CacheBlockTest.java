@@ -424,18 +424,15 @@ class CacheBlockTest {
         }
     }
 
-    // ── StoreListener ────────────────────────────────────────────────────────
+    // ── Typed listeners (PutListener, DeleteListener, ExpireListener, EvictListener) ────
 
     @Test
     void storeListenerReceivesPutAndDelete() {
         List<String> events = new ArrayList<>();
 
         try (CacheBlock<String, byte[]> b = block()) {
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    { events.add("put"); }
-                @Override public void onDelete(byte[] key, CacheEntry entry) { events.add("delete"); }
-                @Override public void onExpire(byte[] key, CacheEntry entry) { events.add("expire"); }
-            });
+            b.addPutListener((key, entry) -> events.add("put"));
+            b.addDeleteListener((key, entry) -> events.add("delete"));
 
             b.put("k", val("v"));
             b.delete("k");
@@ -449,11 +446,7 @@ class CacheBlockTest {
         List<String> events = new ArrayList<>();
 
         try (CacheBlock<String, byte[]> b = blockWithTtl(Duration.ofMillis(50))) {
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    {}
-                @Override public void onDelete(byte[] key, CacheEntry entry) {}
-                @Override public void onExpire(byte[] key, CacheEntry entry) { events.add("expire"); }
-            });
+            b.addExpireListener((key, entry) -> events.add("expire"));
 
             b.put("k", val("v"));
             Thread.sleep(150); // wait for sweep + lazy expiry
@@ -524,23 +517,15 @@ class CacheBlockTest {
         }
     }
 
-    // ── StoreListener correctness ────────────────────────────────────────────
+    // ── Listener correctness ─────────────────────────────────────────────────
 
     @Test
     void throwingListenerDoesNotSilenceOthers() {
         List<String> received = new ArrayList<>();
 
         try (CacheBlock<String, byte[]> b = block()) {
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    { throw new RuntimeException("bad listener"); }
-                @Override public void onDelete(byte[] key, CacheEntry entry) {}
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-            });
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    { received.add("put"); }
-                @Override public void onDelete(byte[] key, CacheEntry entry) {}
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-            });
+            b.addPutListener((key, entry) -> { throw new RuntimeException("bad listener"); });
+            b.addPutListener((key, entry) -> received.add("put"));
 
             assertDoesNotThrow(() -> b.put("k", val("v")),
                     "a throwing listener must not propagate to the put() caller");
@@ -555,16 +540,10 @@ class CacheBlockTest {
         List<String> second = new ArrayList<>();
 
         try (CacheBlock<String, byte[]> b = block()) {
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    { first.add("put"); }
-                @Override public void onDelete(byte[] key, CacheEntry entry) { first.add("delete"); }
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-            });
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    { second.add("put"); }
-                @Override public void onDelete(byte[] key, CacheEntry entry) { second.add("delete"); }
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-            });
+            b.addPutListener((key, entry) -> first.add("put"));
+            b.addDeleteListener((key, entry) -> first.add("delete"));
+            b.addPutListener((key, entry) -> second.add("put"));
+            b.addDeleteListener((key, entry) -> second.add("delete"));
 
             b.put("k", val("v"));
             b.delete("k");
@@ -579,11 +558,7 @@ class CacheBlockTest {
         List<String> events = new ArrayList<>();
 
         try (CacheBlock<String, byte[]> b = block()) {
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    {}
-                @Override public void onDelete(byte[] key, CacheEntry entry) { events.add("delete"); }
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-            });
+            b.addDeleteListener((key, entry) -> events.add("delete"));
 
             b.delete("nonexistent");
             assertTrue(events.isEmpty(), "delete on absent key must not fire onDelete");
@@ -595,11 +570,7 @@ class CacheBlockTest {
         List<String> events = new ArrayList<>();
 
         try (CacheBlock<String, byte[]> b = block()) {
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    { events.add("put"); }
-                @Override public void onDelete(byte[] key, CacheEntry entry) {}
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-            });
+            b.addPutListener((key, entry) -> events.add("put"));
 
             HLCTimestamp ts = new HLCTimestamp(System.currentTimeMillis(), 0);
             CacheEntry entry = new CacheEntry(val("v"), ts, 0L, System.currentTimeMillis(), 0L, null);
@@ -624,12 +595,8 @@ class CacheBlockTest {
                 .build()) {
 
             b.put("first", val("1")); // fills capacity, no eviction yet
-            b.addListener(new StoreListener() {
-                @Override public void onPut(byte[] key, CacheEntry entry)    { events.add("put"); }
-                @Override public void onDelete(byte[] key, CacheEntry entry) {}
-                @Override public void onExpire(byte[] key, CacheEntry entry) {}
-                @Override public void onEvict(byte[] key, CacheEntry entry)  { events.add("evict"); }
-            });
+            b.addPutListener((key, entry) -> events.add("put"));
+            b.addEvictListener((key, entry) -> events.add("evict"));
 
             b.put("second", val("2")); // triggers eviction of "first"
 
