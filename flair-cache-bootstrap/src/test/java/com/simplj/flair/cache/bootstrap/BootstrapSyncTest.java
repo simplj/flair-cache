@@ -71,16 +71,18 @@ class BootstrapSyncTest {
         return bytes;
     }
 
-    private static int freePort() {
+    /** Returns a port that is not currently listening — used only for unreachable-donor tests. */
+    private static int unusedPort() {
         try (ServerSocket s = new ServerSocket(0)) { return s.getLocalPort(); }
         catch (IOException e) { throw new RuntimeException(e); }
     }
 
-    private TcpServer startDonorServer(int port, Map<String, CacheBlock<?, ?>> blocks,
+    /** Starts a donor TcpServer bound to an OS-assigned port (avoids TOCTOU races). */
+    private TcpServer startDonorServer(Map<String, CacheBlock<?, ?>> blocks,
                                        int chunkSize) throws IOException {
         BootstrapServer bootstrapServer = new BootstrapServer(blocks, chunkSize);
         TcpServer srv = TcpServer.builder()
-                .port(port)
+                .port(0)   // OS assigns a free port atomically
                 .handler(bootstrapServer)
                 .build();
         srv.start();
@@ -98,12 +100,11 @@ class BootstrapSyncTest {
         donorBlock.put("k2", val("v2"));
         donorBlock.put("k3", val("v3"));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         SyncResult result = BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -121,12 +122,11 @@ class BootstrapSyncTest {
         donorBlock  = newBlock("data");
         joinerBlock = newBlock("data");
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         SyncResult result = BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -146,13 +146,12 @@ class BootstrapSyncTest {
             donorBlock.put("key-" + i, val("value-" + i));
         }
 
-        int port = freePort();
         // 64 bytes per chunk forces many chunks (each entry is ~20+ bytes)
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 64);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 64);
 
         SyncResult result = BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -182,12 +181,11 @@ class BootstrapSyncTest {
         donorBlock.putRaw(keyBytes, new CacheEntry(encodeVal(val("donor-v1")), older, 0L, 0L, 0L, UUID.randomUUID()));
         joinerBlock.putRaw(keyBytes, new CacheEntry(encodeVal(val("joiner-v2")), newer, 0L, 0L, 0L, UUID.randomUUID()));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -210,12 +208,11 @@ class BootstrapSyncTest {
         joinerBlock.putRaw(keyBytes, new CacheEntry(encodeVal(val("joiner-old")), older, 0L, 0L, 0L, UUID.randomUUID()));
         donorBlock.putRaw(keyBytes,  new CacheEntry(encodeVal(val("donor-new")),  newer, 0L, 0L, 0L, UUID.randomUUID()));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -231,8 +228,7 @@ class BootstrapSyncTest {
 
         donorBlock.put("k1", val("from-donor"));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         ReplicationBuffer buffer = new ReplicationBuffer();
         buffer.startBuffering();
@@ -247,7 +243,7 @@ class BootstrapSyncTest {
 
         SyncResult result = BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .replicationBuffer(buffer)
                 .build()
@@ -266,7 +262,7 @@ class BootstrapSyncTest {
         assertThrows(SyncTimeoutException.class, () ->
                 BootstrapSync.builder()
                         .blocks(Map.of("data", joinerBlock))
-                        .donorAddress("127.0.0.1", freePort())
+                        .donorAddress("127.0.0.1", unusedPort())
                         .syncTimeoutMs(500)
                         .build()
                         .syncFromPeer());
@@ -286,12 +282,11 @@ class BootstrapSyncTest {
         donorBlock.putRaw(keyBytes,  new CacheEntry(encodeVal(val("donor")),  tieTs, 0L, 0L, 0L, hiUUID));
         joinerBlock.putRaw(keyBytes, new CacheEntry(encodeVal(val("joiner")), tieTs, 0L, 0L, 0L, loUUID));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -313,12 +308,11 @@ class BootstrapSyncTest {
         donorBlock.putRaw(keyBytes,  new CacheEntry(encodeVal(val("donor")),  tieTs, 0L, 0L, 0L, loUUID));
         joinerBlock.putRaw(keyBytes, new CacheEntry(encodeVal(val("joiner")), tieTs, 0L, 0L, 0L, hiUUID));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -342,12 +336,11 @@ class BootstrapSyncTest {
                 new CacheEntry(encodeVal(val("expired-value")), hlc.now(),
                         System.currentTimeMillis() - 1_000, 0L, 0L, UUID.randomUUID()));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         SyncResult result = BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -371,12 +364,11 @@ class BootstrapSyncTest {
         donorBlock.putRaw(keyBytes,
                 new CacheEntry(encodeVal(val("v1")), hlc.now(), expiryEpochMs, 0L, 0L, UUID.randomUUID()));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .build()
                 .syncFromPeer();
@@ -396,13 +388,12 @@ class BootstrapSyncTest {
             donorKnown.put("k1", val("v1"));
             donorExtra.put("e1", val("extra-v1"));
 
-            int port = freePort();
-            donorServer = startDonorServer(port,
+            donorServer = startDonorServer(
                     Map.of("known", donorKnown, "extra", donorExtra), 65536);
 
             SyncResult result = BootstrapSync.builder()
                     .blocks(Map.of("known", joinerKnown))
-                    .donorAddress("127.0.0.1", port)
+                    .donorAddress("127.0.0.1", donorServer.localPort())
                     .syncTimeoutMs(10_000)
                     .build()
                     .syncFromPeer();
@@ -431,8 +422,7 @@ class BootstrapSyncTest {
         donorBlock.putRaw(keyBytes,
                 new CacheEntry(encodeVal(val("donor-new")), newer, 0L, 0L, 0L, UUID.randomUUID()));
 
-        int port = freePort();
-        donorServer = startDonorServer(port, Map.of("data", donorBlock), 65536);
+        donorServer = startDonorServer(Map.of("data", donorBlock), 65536);
 
         ReplicationBuffer buffer = new ReplicationBuffer();
         buffer.startBuffering();
@@ -443,7 +433,7 @@ class BootstrapSyncTest {
 
         BootstrapSync.builder()
                 .blocks(Map.of("data", joinerBlock))
-                .donorAddress("127.0.0.1", port)
+                .donorAddress("127.0.0.1", donorServer.localPort())
                 .syncTimeoutMs(10_000)
                 .replicationBuffer(buffer)
                 .build()
@@ -484,10 +474,9 @@ class BootstrapSyncTest {
     @Test
     void syncDoneNeverArrivesThrowsTimeout() throws Exception {
         joinerBlock = newBlock("data");
-        int port = freePort();
         // Server that accepts the connection but never sends any frames
         donorServer = TcpServer.builder()
-                .port(port)
+                .port(0)   // OS assigns a free port atomically
                 .handler((conn, frame) -> { /* swallow — no response */ })
                 .build();
         donorServer.start();
@@ -495,7 +484,7 @@ class BootstrapSyncTest {
         assertThrows(SyncTimeoutException.class, () ->
                 BootstrapSync.builder()
                         .blocks(Map.of("data", joinerBlock))
-                        .donorAddress("127.0.0.1", port)
+                        .donorAddress("127.0.0.1", donorServer.localPort())
                         .syncTimeoutMs(500)
                         .build()
                         .syncFromPeer());
@@ -512,14 +501,13 @@ class BootstrapSyncTest {
         donorUsers.put("u2", val("bob"));
         donorOrders.put("o1", val("order-1"));
 
-        int port = freePort();
-        donorServer = startDonorServer(port,
+        donorServer = startDonorServer(
                 Map.of("users", donorUsers, "orders", donorOrders), 65536);
 
         try {
             SyncResult result = BootstrapSync.builder()
                     .blocks(Map.of("users", joinerUsers, "orders", joinerOrders))
-                    .donorAddress("127.0.0.1", port)
+                    .donorAddress("127.0.0.1", donorServer.localPort())
                     .syncTimeoutMs(10_000)
                     .build()
                     .syncFromPeer();
