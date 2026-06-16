@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.replication;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import com.simplj.flair.cache.gossip.MembershipListener;
 import com.simplj.flair.cache.gossip.NodeInfo;
 import com.simplj.flair.cache.transport.Connection;
@@ -40,13 +41,40 @@ final class PeerRegistry implements MembershipListener {
     // Consecutive failure count per peer — drives exponential backoff calculation.
     private final ConcurrentHashMap<UUID, Integer>    failureCount = new ConcurrentHashMap<>();
     private final ExecutorService connectPool;
+    private final AckTracker ackTracker;
 
-    PeerRegistry(UUID localNodeId, NioEventLoop sharedEventLoop) {
+    // Bounded flush window for a graceful peer leave — give the writer a short window to drain
+    // pending frames before the connection is torn down. Default 10× the batch window.
+    private final long leaveFlushTimeoutMs;
+
+    // Invoked with the number of frames discarded when a dead peer's queue is drained. Wired by
+    // the facade to ReplicationMetricsMBean.recordDroppedFrame (replication cannot depend on
+    // the metrics module). No-op by default.
+    private volatile java.util.function.LongConsumer onFramesDropped = n -> {};
+
+    PeerRegistry(UUID localNodeId, NioEventLoop sharedEventLoop, AckTracker ackTracker) {
+        this(localNodeId, sharedEventLoop, ackTracker, 20L);
+    }
+
+    PeerRegistry(UUID localNodeId, NioEventLoop sharedEventLoop, AckTracker ackTracker,
+                 long leaveFlushTimeoutMs) {
         this.localNodeId = localNodeId;
         this.sharedEventLoop = sharedEventLoop;
+        this.ackTracker = ackTracker;
+        this.leaveFlushTimeoutMs = leaveFlushTimeoutMs;
         this.connectPool = Executors.newFixedThreadPool(
                 Math.max(4, Runtime.getRuntime().availableProcessors()),
                 new FlairCacheThreadFactory("flaircache-peer-connect", true));
+    }
+
+    /** Registers a sink for the count of frames discarded when a dead peer's queue is drained. */
+    void onFramesDropped(java.util.function.LongConsumer sink) {
+        if (sink != null) this.onFramesDropped = sink;
+    }
+
+    /** Test-only seam: install an outgoing connection directly, bypassing the TCP connect path. */
+    void installConnectionForTest(UUID peerId, Connection conn) {
+        outgoing.put(peerId, conn);
     }
 
     void connectAsync(NodeInfo node) {
@@ -147,6 +175,50 @@ final class PeerRegistry implements MembershipListener {
         if (conn != null) {
             conn.close();
         }
+        reevaluateInFlight(nodeId);
+    }
+
+    /**
+     * Graceful leave: attempt a bounded flush of the peer's pending frames before closing.
+     * The flush is capped at {@link #leaveFlushTimeoutMs} so a slow or stuck peer never blocks
+     * membership processing indefinitely.
+     */
+    void disconnectPeerGraceful(UUID nodeId) {
+        lastPongMs.remove(nodeId);
+        Connection conn = outgoing.remove(nodeId);
+        if (conn != null) {
+            conn.closeGraceful(leaveFlushTimeoutMs);
+        }
+        reevaluateInFlight(nodeId);
+    }
+
+    /**
+     * Dead peer: the peer is unreachable, so drain and discard its queued frames rather than
+     * attempting to send them. The number of discarded frames is reported via
+     * {@link #onFramesDropped} (wired to the DroppedFrameCount metric by the facade).
+     */
+    void disconnectPeerDead(UUID nodeId) {
+        lastPongMs.remove(nodeId);
+        Connection conn = outgoing.remove(nodeId);
+        if (conn != null) {
+            int discarded = conn.closeAndDiscard();
+            if (discarded > 0) {
+                onFramesDropped.accept(discarded);
+                if (log.isLoggable(Level.FINE)) {
+                    log.fine("Discarded " + discarded + " queued frame(s) for dead peer " + nodeId);
+                }
+            }
+        }
+        reevaluateInFlight(nodeId);
+    }
+
+    // Re-evaluate in-flight QUORUM/STRONG writes immediately: a removed peer can no longer ACK,
+    // so any write waiting on it should complete or fail now rather than block for the full
+    // ACK timeout.
+    private void reevaluateInFlight(UUID nodeId) {
+        if (ackTracker != null) {
+            ackTracker.onPeerDead(nodeId);
+        }
     }
 
     void shutdown() {
@@ -187,15 +259,17 @@ final class PeerRegistry implements MembershipListener {
     @Override
     public void onLeave(NodeInfo node) {
         clearRetryState(node.id()); // SWIM has removed this peer — no future retries needed
-        disconnectPeer(node.id());
-        log.fine("Peer left, closed connection: " + node.id());
+        // Graceful leave: bounded-flush pending frames before tearing the connection down.
+        disconnectPeerGraceful(node.id());
+        log.fine("Peer left, flushed and closed connection: " + node.id());
     }
 
     @Override
     public void onDead(NodeInfo node) {
         clearRetryState(node.id()); // SWIM has removed this peer — no future retries needed
-        disconnectPeer(node.id());
-        log.fine("Peer declared dead, closed connection: " + node.id());
+        // Dead peer is unreachable: drain-and-discard queued frames, counting them as dropped.
+        disconnectPeerDead(node.id());
+        log.fine("Peer declared dead, discarded queue and closed connection: " + node.id());
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────

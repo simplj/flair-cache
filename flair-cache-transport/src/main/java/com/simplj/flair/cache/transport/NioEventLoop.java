@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.transport;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
 import javax.net.ssl.SSLEngineResult.HandshakeStatus;

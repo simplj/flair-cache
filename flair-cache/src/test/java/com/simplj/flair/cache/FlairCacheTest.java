@@ -405,18 +405,15 @@ class FlairCacheTest {
         AtomicReference<String> received = new AtomicReference<>();
         AtomicReference<ChangeEvent.Source> receivedSource = new AtomicReference<>();
 
+        // A single raw-event subscriber captures both the value and the Source, then
+        // counts down the latch. Using one subscriber gives a single synchronization
+        // point so the assertions below never race a not-yet-dispatched callback.
         WatchHandle handle = registry.watch()
-                .onPut((key, value) -> {
-                    received.set(value);
-                    latch.countDown();
-                })
-                .register();
-
-        // Also subscribe to raw events to capture Source
-        WatchHandle handle2 = registry.watch()
                 .onEvent(event -> {
                     if (event instanceof ChangeEvent.PutEvent<?,?> put) {
+                        received.set((String) put.newValue());
                         receivedSource.set(put.source());
+                        latch.countDown();
                     }
                 })
                 .register();
@@ -427,7 +424,6 @@ class FlairCacheTest {
         assertEquals(ChangeEvent.Source.LOCAL, receivedSource.get(),
                 "Local put must dispatch with Source.LOCAL");
         handle.cancel();
-        handle2.cancel();
     }
 
     @Test

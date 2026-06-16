@@ -102,6 +102,35 @@ final class ConnectionImpl implements Connection {
     }
 
     @Override
+    public int pendingWrites() {
+        return writeQueue.pendingCount();
+    }
+
+    @Override
+    public void closeGraceful(long flushTimeoutMs) {
+        alive = false;
+        // Bounded flush: let the writer drain queued frames for up to flushTimeoutMs.
+        writeQueue.flushAndShutdown(flushTimeoutMs);
+        try {
+            channel.close();
+        } catch (IOException e) {
+            log.log(Level.FINEST, "Error closing channel " + id, e);
+        }
+    }
+
+    @Override
+    public int closeAndDiscard() {
+        alive = false;
+        int discarded = writeQueue.drainAndDiscard();
+        try {
+            channel.close();
+        } catch (IOException e) {
+            log.log(Level.FINEST, "Error closing channel " + id, e);
+        }
+        return discarded;
+    }
+
+    @Override
     public boolean isAlive() {
         return alive && !writeQueue.hasWriteFailed();
     }

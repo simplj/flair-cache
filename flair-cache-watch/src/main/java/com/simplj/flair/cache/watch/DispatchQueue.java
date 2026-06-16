@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.watch;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;

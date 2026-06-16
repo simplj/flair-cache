@@ -105,16 +105,31 @@ final class IncomingHandler implements FrameHandler {
             CacheBlock<?, ?> block = lookup.apply(decoded.blockName());
             if (block != null) {
                 // Sync HLC with the remote clock before applying — spec requires it for all frames.
-                // Mark the calling thread so that the DeleteListener registered via attachBlock does
-                // not re-replicate this delete back to peers.
                 block.updateClock(decoded.hlc());
-                ReplicationEngine.INCOMING.set(true);
-                try {
-                    block.deleteRaw(decoded.key());
-                } finally {
-                    ReplicationEngine.INCOMING.set(false);
+
+                // LWW guard: an out-of-order DELETE (older HLC than the entry it would remove)
+                // must not silently clobber a newer PUT — that causes cluster divergence. Only
+                // apply the delete if it is causally newer-or-equal to the existing entry.
+                CacheEntry existing = block.getRaw(decoded.key());
+                if (existing != null && existing.hlc().compareTo(decoded.hlc()) > 0) {
+                    // Existing entry is newer — stale delete, skip it (but still ACK below so the
+                    // sender's QUORUM/STRONG tracking completes; the delete was processed, just lost).
+                    if (log.isLoggable(Level.FINEST)) {
+                        log.finest("Rejected stale DELETE for key in block " + decoded.blockName()
+                                + " — existing HLC newer than incoming");
+                    }
+                    applied = true;
+                } else {
+                    // Mark the calling thread so that the DeleteListener registered via attachBlock
+                    // does not re-replicate this delete back to peers.
+                    ReplicationEngine.INCOMING.set(true);
+                    try {
+                        block.deleteRaw(decoded.key());
+                    } finally {
+                        ReplicationEngine.INCOMING.set(false);
+                    }
+                    applied = true;
                 }
-                applied = true;
             }
         }
 

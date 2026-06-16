@@ -278,6 +278,30 @@ class IncomingHandlerTest {
     }
 
     @Test
+    void delete_with_older_hlc_does_not_remove_newer_put() {
+        // PUT lands at HLC logical=10. An out-of-order DELETE carrying logical=5 (older) must
+        // NOT remove the entry — applying it would clobber a newer write and diverge the cluster.
+        byte[] key = "del-lww-1".getBytes();
+        block.putRaw(key, entry("fresh".getBytes(), 10L, 0L));
+
+        handler.onFrame(noOp(), encodeDelete(70L, false, "items", key, new HLCTimestamp(5L, 0L)));
+
+        assertNotNull(block.getRaw(key), "stale DELETE (older HLC) must be rejected");
+        assertArrayEquals("fresh".getBytes(), block.getRaw(key).value());
+    }
+
+    @Test
+    void delete_with_newer_hlc_removes_entry() {
+        // PUT lands at HLC logical=5. A DELETE carrying logical=10 (newer) wins and removes it.
+        byte[] key = "del-lww-2".getBytes();
+        block.putRaw(key, entry("stale".getBytes(), 5L, 0L));
+
+        handler.onFrame(noOp(), encodeDelete(71L, false, "items", key, new HLCTimestamp(10L, 0L)));
+
+        assertNull(block.getRaw(key), "newer DELETE must win and remove the entry");
+    }
+
+    @Test
     void delete_does_not_send_ack_when_needsAck_false() {
         byte[] key = "k12".getBytes();
         Capture cap = new Capture();
@@ -405,9 +429,14 @@ class IncomingHandlerTest {
 
     private static RawFrame encodeDelete(long frameId, boolean needsAck,
                                          String blockName, byte[] key) {
+        return encodeDelete(frameId, needsAck, blockName, key, new HLCTimestamp(1L, 0L));
+    }
+
+    private static RawFrame encodeDelete(long frameId, boolean needsAck,
+                                         String blockName, byte[] key, HLCTimestamp hlc) {
         return FrameEncoder.encodeDelete(frameId, needsAck,
                 new ReplicationEvent.DeleteEvent(blockName, key,
-                        new HLCTimestamp(1L, 0L), UUID.randomUUID(), ConsistencyMode.EVENTUAL));
+                        hlc, UUID.randomUUID(), ConsistencyMode.EVENTUAL));
     }
 
     private static Connection noOp() {

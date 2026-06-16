@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.replication;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import com.simplj.flair.cache.gossip.GossipNode;
 import com.simplj.flair.cache.gossip.NodeInfo;
 import com.simplj.flair.cache.store.CacheBlock;
@@ -84,6 +85,9 @@ public final class ReplicationEngine {
     private volatile ReplicationFanout fanout;
     private volatile ScheduledExecutorService keepaliveScheduler;
     private volatile Consumer<ReplicationEvent> incomingCallback;
+    // Sink for frames dropped when a dead peer's queue is discarded. Wired to the
+    // DroppedFrameCount metric by the facade. No-op by default.
+    private volatile java.util.function.LongConsumer framesDroppedSink = n -> {};
 
     private ReplicationEngine(Builder b) {
         this.localNodeId      = b.localNodeId;
@@ -108,7 +112,8 @@ public final class ReplicationEngine {
         }
         // Pass the server's event loop so all outgoing connections share the single
         // flaircache-nio-selector thread rather than each spawning their own.
-        peerRegistry = new PeerRegistry(localNodeId, transport.eventLoop());
+        peerRegistry = new PeerRegistry(localNodeId, transport.eventLoop(), ackTracker);
+        peerRegistry.onFramesDropped(framesDroppedSink);
         fanout = new ReplicationFanout(peerRegistry, cluster.members(), localNodeId,
                 batchWindowMs, batchMaxFrames);
 
@@ -267,7 +272,9 @@ public final class ReplicationEngine {
         }
 
         long expiryMs = System.currentTimeMillis() + ackTimeoutMs;
-        PendingWrite pw = new PendingWrite(frameId, required, expiryMs);
+        // expectedPeers = the alive peers this frame is broadcast to. AckTracker.onPeerDead uses
+        // this to fail fast (or complete) a write when membership shrinks mid-flight.
+        PendingWrite pw = new PendingWrite(frameId, required, alivePeers, expiryMs);
         ackTracker.track(pw);
 
         if (!fanout.offer(new ReplicationFanout.QueuedEvent(event, frameId, true))) {
@@ -309,6 +316,19 @@ public final class ReplicationEngine {
      */
     public void onIncoming(Consumer<ReplicationEvent> callback) {
         this.incomingCallback = callback;
+    }
+
+    /**
+     * Registers a sink invoked with the number of frames discarded when a peer is declared DEAD
+     * and its pending write queue is drained without sending. Intended for the DroppedFrameCount
+     * metric. May be called before or after {@link #start()}; if called after start it is applied
+     * to the live {@link PeerRegistry} immediately.
+     */
+    public void onFramesDropped(java.util.function.LongConsumer sink) {
+        if (sink == null) return;
+        this.framesDroppedSink = sink;
+        PeerRegistry registry = peerRegistry;
+        if (registry != null) registry.onFramesDropped(sink);
     }
 
     // ── Package-private accessors ─────────────────────────────────────────────

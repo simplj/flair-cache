@@ -10,13 +10,13 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>flair-cache-serial</artifactId>
-    <name>FlairCache — Binary Serialization</name>
+    <artifactId>flair-cache-commons</artifactId>
+    <name>FlairCache — Commons</name>
     <description>
-        Fast zero-dependency binary serialization for FlairCache — hand-rolled POJO ↔ ByteBuffer
-        encoding with no reflection and no external libraries. Usable standalone in any Java project
-        that needs compact, efficient binary serialization without third-party dependencies.
+        Shared zero-dependency utilities used by every FlairCache module — currently the single
+        FlairCacheThreadFactory through which all FlairCache threads are created (daemon, named).
+        Has zero dependencies on any other FlairCache module.
     </description>
 
-    <!-- Standalone module: zero FLAIR dependencies -->
+    <!-- Leaf module: zero FLAIR dependencies. -->
 </project>

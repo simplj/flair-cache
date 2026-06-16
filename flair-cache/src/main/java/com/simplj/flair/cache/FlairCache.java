@@ -517,8 +517,16 @@ public final class FlairCache implements Closeable {
         cleanup.add(engine::shutdown);
         engine.start();
 
-        // Step 9: Wire replication metrics.
-        metricsRegistry.withReplication(engine);
+        // Step 9: Wire replication metrics. Route discarded-frame counts (from dead-peer queue
+        // draining) into the DroppedFrameCount metric — replication cannot depend on the metrics
+        // module, so the facade bridges the two here.
+        com.simplj.flair.cache.metrics.ReplicationMetricsMBean replMetrics =
+                metricsRegistry.withReplication(engine);
+        engine.onFramesDropped(n -> {
+            for (long i = 0; i < n; i++) {
+                replMetrics.recordDroppedFrame();
+            }
+        });
     }
 
     private void flushReplication() {
