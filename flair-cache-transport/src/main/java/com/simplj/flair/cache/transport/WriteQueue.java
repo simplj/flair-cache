@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.transport;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
 import java.io.IOException;
@@ -31,6 +32,8 @@ final class WriteQueue {
     private final Thread worker;
     private volatile boolean running = true;
     private volatile boolean writeFailed = false;
+    // Set by drainAndDiscard() so the worker's post-loop drain does NOT flush queued frames.
+    private volatile boolean discarding = false;
 
     // Controlled by NioEventLoop: false until TLS handshake completes; always true for plaintext.
     // The writer thread holds all frames until this is set so application data is never sent before
@@ -90,6 +93,56 @@ final class WriteQueue {
         worker.interrupt();
     }
 
+    /** Number of frames enqueued but not yet handed to the writer thread. */
+    int pendingCount() {
+        return queue.size();
+    }
+
+    /**
+     * Bounded flush: signals the writer to stop accepting new work and to drain what remains,
+     * then waits up to {@code timeoutMs} for the queue to empty and the worker to finish.
+     * Does NOT interrupt the worker while it is flushing — interruption is only used as a last
+     * resort once the timeout elapses. Used for a graceful peer leave.
+     */
+    void flushAndShutdown(long timeoutMs) {
+        running = false; // stops the drainLoop's while(running); it then drains the queue best-effort
+        long deadline = System.nanoTime() + timeoutMs * 1_000_000L;
+        try {
+            while (worker.isAlive() && System.nanoTime() < deadline) {
+                worker.join(1L);
+                if (queue.isEmpty() && !worker.isAlive()) break;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        // Timed out (or interrupted) with the worker still running — force it down.
+        if (worker.isAlive()) {
+            worker.interrupt();
+        }
+    }
+
+    /**
+     * Drains and discards every queued frame without sending, then shuts the writer down.
+     * Returns the number of frames discarded. Used when the peer is unreachable (dead) and
+     * flushing would only block.
+     */
+    int drainAndDiscard() {
+        // Set discarding before stopping the loop so the worker's post-loop drain skips flushing.
+        discarding = true;
+        running = false;
+        worker.interrupt(); // break the worker out of its 1ms poll so it exits without flushing
+        try {
+            worker.join(100L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        int discarded = 0;
+        while (queue.poll() != null) {
+            discarded++;
+        }
+        return discarded;
+    }
+
     boolean hasWriteFailed() {
         return writeFailed;
     }
@@ -131,6 +184,12 @@ final class WriteQueue {
                 writeFailed = true;
                 break;
             }
+        }
+
+        // If we are discarding (peer declared dead), do NOT flush — the caller will drain the
+        // queue and count the dropped frames.
+        if (discarding) {
+            return;
         }
 
         // Flush whatever remains in the current batch

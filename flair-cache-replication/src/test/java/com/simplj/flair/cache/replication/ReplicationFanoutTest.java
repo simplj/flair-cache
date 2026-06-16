@@ -75,7 +75,7 @@ class ReplicationFanoutTest {
     @Test
     void fanout_queue_rejects_offer_at_capacity_plus_one() throws Exception {
         try (EngineScope scope = new EngineScope()) {
-            PeerRegistry registry = new PeerRegistry(UUID.randomUUID(), scope.server.eventLoop());
+            PeerRegistry registry = new PeerRegistry(UUID.randomUUID(), scope.server.eventLoop(), null);
             ReplicationFanout fanout = new ReplicationFanout(
                     registry, scope.gossip.members(), UUID.randomUUID(), 2L, 64);
             // Do NOT start the fanout drain thread — queue must stay full

@@ -146,7 +146,7 @@ FLAIR is built as composable standalone modules. Each module is independently us
 | [Bootstrap](flair-cache-bootstrap/README.md) | `flair-cache-bootstrap` | State sync for new node join |
 | [DSL](flair-cache-dsl/README.md) | `flair-cache-dsl` | Query DSL — filter, join, aggregate over cache blocks |
 | [Watch](flair-cache-watch/README.md) | `flair-cache-watch` | Reactivity — subscribe to cache change events |
-| Metrics | `flair-cache-metrics` | JMX metrics and monitoring |
+| [Metrics](flair-cache-metrics/README.md) | `flair-cache-metrics` | JMX metrics and monitoring |
 
 ---
 
@@ -310,8 +310,8 @@ FLAIR is currently in active development. The library is being built module by m
 - [x] [`flair-cache-bootstrap`](flair-cache-bootstrap/README.md) — Bootstrap sync
 - [x] [`flair-cache-dsl`](flair-cache-dsl/README.md) — Query DSL
 - [x] [`flair-cache-watch`](flair-cache-watch/README.md) — Watch / reactivity
-- [ ] `flair-cache-metrics` — JMX metrics
-- [ ] `flair-cache` — FlairCache facade (final assembly)
+- [x] [`flair-cache-metrics`](flair-cache-metrics/README.md) — JMX metrics
+- [x] [`flair-cache`](flair-cache/README.md) — FlairCache facade (final assembly)
 - [ ] First stable release on Maven Central
 
 Watch / star the repository to be notified of the first release.

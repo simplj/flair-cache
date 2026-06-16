@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.replication;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import com.simplj.flair.cache.gossip.MembershipList;
 import com.simplj.flair.cache.gossip.NodeInfo;
 import com.simplj.flair.cache.transport.Connection;
@@ -56,6 +57,10 @@ final class ReplicationFanout implements Runnable {
 
     boolean offer(QueuedEvent event) {
         return queue.offer(event);
+    }
+
+    int queueSize() {
+        return queue.size();
     }
 
     @Override

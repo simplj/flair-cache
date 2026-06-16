@@ -152,6 +152,73 @@ class AckTrackerTest {
         }
     }
 
+    // ── onPeerDead — re-evaluation on peer disconnect ─────────────────────────
+
+    @Test
+    void onPeerDead_completes_write_when_remaining_acks_satisfy_quorum() {
+        // QUORUM: 2 ACKs required out of 3 peers. One ACK arrives, then one of the remaining
+        // two peers dies. With the cluster shrunk, received(1) + dead(1) >= required(2) → success.
+        AckTracker tracker = new AckTracker();
+        try {
+            PendingWrite pw = new PendingWrite(20L, 2, 3, System.currentTimeMillis() + 60_000);
+            tracker.track(pw);
+            tracker.onAck(20L);
+            assertFalse(pw.future.isDone(), "one ACK alone must not satisfy quorum of 2");
+
+            tracker.onPeerDead(java.util.UUID.randomUUID());
+
+            assertTrue(pw.future.isDone(), "peer death must complete the write immediately");
+            assertFalse(pw.future.isCompletedExceptionally(), "write must complete successfully");
+        } finally {
+            tracker.shutdown();
+        }
+    }
+
+    @Test
+    void onPeerDead_fails_write_when_quorum_becomes_unreachable() throws Exception {
+        // 3 of 4 peers must ACK. No ACKs arrive. After 1 death, 3 peers remain reachable — quorum
+        // of 3 still achievable, so the write stays pending. After a 2nd death only 2 reachable
+        // remain (max achievable = expected 4 - dead 2 = 2 < required 3) → fail immediately.
+        AckTracker tracker = new AckTracker();
+        try {
+            PendingWrite pw = new PendingWrite(21L, 3, 4, System.currentTimeMillis() + 60_000);
+            tracker.track(pw);
+
+            tracker.onPeerDead(java.util.UUID.randomUUID());
+            assertFalse(pw.future.isDone(),
+                    "after 1 death, 3 of 4 peers reachable — quorum of 3 still achievable");
+
+            tracker.onPeerDead(java.util.UUID.randomUUID());
+            assertTrue(pw.future.isDone(),
+                    "after 2 deaths only 2 of 4 reachable — quorum of 3 unreachable, must fail now");
+            assertTrue(pw.future.isCompletedExceptionally(), "write must fail, not succeed");
+            ExecutionException ex = assertThrows(ExecutionException.class, pw.future::get);
+            assertInstanceOf(ReplicationTimeoutException.class, ex.getCause());
+        } finally {
+            tracker.shutdown();
+        }
+    }
+
+    @Test
+    void onPeerDead_strong_consistency_fails_on_first_death() throws Exception {
+        // STRONG: all 3 peers must ACK. No ACKs yet. The first death makes it impossible to ever
+        // collect 3 ACKs (a dead peer never ACKs) → fail immediately rather than block on timeout.
+        AckTracker tracker = new AckTracker();
+        try {
+            PendingWrite pw = new PendingWrite(22L, 3, 3, System.currentTimeMillis() + 60_000);
+            tracker.track(pw);
+
+            tracker.onPeerDead(java.util.UUID.randomUUID());
+
+            assertTrue(pw.future.isDone(), "STRONG write must fail the moment any peer dies");
+            assertTrue(pw.future.isCompletedExceptionally());
+            ExecutionException ex = assertThrows(ExecutionException.class, pw.future::get);
+            assertInstanceOf(ReplicationTimeoutException.class, ex.getCause());
+        } finally {
+            tracker.shutdown();
+        }
+    }
+
     // ── shutdown ──────────────────────────────────────────────────────────────
 
     @Test

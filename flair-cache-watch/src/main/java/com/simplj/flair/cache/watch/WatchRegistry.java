@@ -119,6 +119,11 @@ public final class WatchRegistry<K, V> {
         subscriptions.removeIf(s -> s.subscriptionId.equals(subscriptionId));
     }
 
+    /** Returns {@code true} if at least one subscription is registered. O(1) — safe to call on every write. */
+    public boolean hasSubscribers() {
+        return !subscriptions.isEmpty();
+    }
+
     /** Visible for testing. Returns subscriptions where isActive() is true. */
     int activeSubscriptionCount() {
         int count = 0;

@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.gossip;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;

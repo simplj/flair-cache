@@ -1,6 +1,7 @@
 package com.simplj.flair.cache.bootstrap;
 
 import com.simplj.flair.cache.replication.ConflictResolver;
+import com.simplj.flair.cache.replication.ReplicationEngine;
 import com.simplj.flair.cache.replication.ReplicationEvent;
 import com.simplj.flair.cache.store.CacheBlock;
 import com.simplj.flair.cache.store.CacheEntry;
@@ -76,16 +77,23 @@ public final class ReplicationBuffer {
         CacheBlock<?, ?> block = blocks.get(event.blockName());
         if (block == null) return;
 
-        if (event instanceof ReplicationEvent.PutEvent put) {
-            CacheEntry existing = block.getRaw(put.key());
-            CacheEntry winner = (existing == null)
-                    ? put.entry()
-                    : resolver.resolve(existing, put.entry());
-            if (existing == null || winner != existing) {
-                block.putRaw(put.key(), winner);
+        // Mark replay as INCOMING so PutListener/DeleteListener registered via
+        // ReplicationEngine.attachBlock do not re-replicate buffered events back to peers.
+        ReplicationEngine.markIncoming(true);
+        try {
+            if (event instanceof ReplicationEvent.PutEvent put) {
+                CacheEntry existing = block.getRaw(put.key());
+                CacheEntry winner = (existing == null)
+                        ? put.entry()
+                        : resolver.resolve(existing, put.entry());
+                if (existing == null || winner != existing) {
+                    block.putRaw(put.key(), winner);
+                }
+            } else if (event instanceof ReplicationEvent.DeleteEvent del) {
+                block.deleteRaw(del.key());
             }
-        } else if (event instanceof ReplicationEvent.DeleteEvent del) {
-            block.deleteRaw(del.key());
+        } finally {
+            ReplicationEngine.markIncoming(false);
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.simplj.flair.cache.bootstrap;
 
+import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import com.simplj.flair.cache.store.CacheBlock;
 import com.simplj.flair.cache.store.CacheEntry;
 import com.simplj.flair.cache.transport.Connection;

@@ -5,12 +5,15 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -28,6 +31,8 @@ public final class GossipNode {
     private final FailureDetector   failureDetector;
     // CopyOnWriteArrayList: addMembershipListener() may race with tick/receive threads calling onXxx()
     private final java.util.concurrent.CopyOnWriteArrayList<MembershipListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    private final LongAdder tickCount = new LongAdder();
 
     // For PING_REQ forwarding: targetId → set of original requesters.
     // A Set (not single address) because two nodes can simultaneously ask us to probe the same target.
@@ -76,6 +81,10 @@ public final class GossipNode {
         tick.start();
 
         for (String seed : config.seedPeers) {
+            if (isSeedSelf(seed)) {
+                log.fine("Skipping self in seed list: " + seed);
+                continue;
+            }
             trySendJoin(seed);
         }
 
@@ -94,16 +103,16 @@ public final class GossipNode {
             }
         }
 
-        tick.stop();
-        receiver.stop();
+        if (tick != null) tick.stop();
+        if (receiver != null) receiver.stop();
         log.info("GossipNode stopped: id=" + nodeId);
     }
 
     /** Stops the node without broadcasting LEAVE — simulates a crash for testing. */
     void simulateFail() {
         running = false;
-        tick.stop();
-        receiver.stop();
+        if (tick != null) tick.stop();
+        if (receiver != null) receiver.stop();
     }
 
     /**
@@ -132,10 +141,17 @@ public final class GossipNode {
 
     public int localPort() { return localPort; }
 
+    /** Returns {@code true} if this node has been started and not yet shut down. */
+    public boolean isStarted() { return running; }
+
     // ── Tick ─────────────────────────────────────────────────────────────────
+
+    /** Returns the total number of gossip ticks completed since this node started. */
+    public long gossipTickCount() { return tickCount.sum(); }
 
     void onTick() {
         if (!running) return;
+        tickCount.increment();
         long now = System.currentTimeMillis();
         checkProbeTimeouts(now);
         checkSuspicionTimeouts(now);
@@ -521,6 +537,26 @@ public final class GossipNode {
                 notifyListeners(l -> l.onJoin(n));
             }
         }
+    }
+
+    private boolean isSeedSelf(String seed) {
+        try {
+            int colon = seed.lastIndexOf(':');
+            if (colon < 0) return false;
+            int port = Integer.parseInt(seed.substring(colon + 1));
+            if (port != localPort) return false;
+            InetAddress addr = InetAddress.getByName(seed.substring(0, colon));
+            if (!bindAddress.isAnyLocalAddress()) return bindAddress.equals(addr);
+            Enumeration<NetworkInterface> nics = NetworkInterface.getNetworkInterfaces();
+            if (nics == null) return false;
+            while (nics.hasMoreElements()) {
+                Enumeration<InetAddress> ifAddrs = nics.nextElement().getInetAddresses();
+                while (ifAddrs.hasMoreElements()) {
+                    if (ifAddrs.nextElement().equals(addr)) return true;
+                }
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     private void trySendJoin(String seed) {

@@ -2,6 +2,7 @@ package com.simplj.flair.cache.bootstrap;
 
 import com.simplj.flair.cache.replication.ConflictResolver;
 import com.simplj.flair.cache.replication.LWWResolver;
+import com.simplj.flair.cache.replication.ReplicationEngine;
 import com.simplj.flair.cache.store.CacheBlock;
 import com.simplj.flair.cache.store.CacheEntry;
 import com.simplj.flair.cache.transport.FrameHandler;
@@ -141,7 +142,15 @@ public final class BootstrapSync {
                     ? e.entry()
                     : conflictResolver.resolve(existing, e.entry());
             if (existing == null || winner != existing) {
-                block.putRaw(e.key(), winner);
+                // Mark the apply as INCOMING so that any PutListener registered via
+                // ReplicationEngine.attachBlock does not re-replicate bootstrap entries back to peers.
+                // INCOMING (ThreadLocal) is the load-bearing guard; the originNodeId guard is defense-in-depth.
+                ReplicationEngine.markIncoming(true);
+                try {
+                    block.putRaw(e.key(), winner);
+                } finally {
+                    ReplicationEngine.markIncoming(false);
+                }
             }
         }
     }

@@ -44,6 +44,7 @@
           → aggregate (flair-cache) → benchmarks (not published)
     -->
     <modules>
+        <module>flair-cache-commons</module>
         <module>flair-cache-serial</module>
         <module>flair-cache-hlc</module>
         <module>flair-cache-transport</module>
@@ -92,6 +93,11 @@
     <dependencyManagement>
         <dependencies>
             <!-- ── Internal modules ───────────────────────────────────────── -->
+            <dependency>
+                <groupId>com.simplj.flair</groupId>
+                <artifactId>flair-cache-commons</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.simplj.flair</groupId>
                 <artifactId>flair-cache-serial</artifactId>
