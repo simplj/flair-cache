@@ -29,39 +29,20 @@ implementation "com.simplj.flair:flair-cache-replication:${flairVersion}"
 
 ## Complete Example
 
-### 1. Implement a `Codec` for your key and value types
+### 1. Choose a `Codec` for your key and value types
 
-`Codec<T>` is the contract for binary serialization. Implement `sizeOf`, `serialize`,
-and `deserialize` for each type you store.
+`Codec<T>` is the contract for binary serialization. For common types the library ships
+ready-made singletons in `flair-cache-serial` — use them directly:
 
 ```java
-import com.simplj.flair.cache.serial.Codec;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
+import com.simplj.flair.cache.serial.codecs.StringCodec;
 
-Codec<String> stringCodec = new Codec<String>() {
-
-    @Override
-    public int sizeOf(String v) {
-        return 2 + v.getBytes(StandardCharsets.UTF_8).length;
-    }
-
-    @Override
-    public void serialize(String v, ByteBuffer buf) {
-        byte[] bytes = v.getBytes(StandardCharsets.UTF_8);
-        buf.putShort((short) bytes.length);
-        buf.put(bytes);
-    }
-
-    @Override
-    public String deserialize(ByteBuffer buf) {
-        int len = buf.getShort() & 0xFFFF;
-        byte[] bytes = new byte[len];
-        buf.get(bytes);
-        return new String(bytes, StandardCharsets.UTF_8);
-    }
-};
+// StringCodec.INSTANCE handles null, empty strings, and the full Unicode range.
+// It uses a thread-local CharsetEncoder — zero byte[] allocation per call.
+Codec<String> stringCodec = StringCodec.INSTANCE;
 ```
+
+For custom types implement `Codec<T>` directly (`sizeOf`, `serialize`, `deserialize`).
 
 ### 2. Build a `CacheBlock`
 

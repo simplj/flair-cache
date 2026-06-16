@@ -311,7 +311,7 @@ FLAIR is currently in active development. The library is being built module by m
 - [x] [`flair-cache-dsl`](flair-cache-dsl/README.md) — Query DSL
 - [x] [`flair-cache-watch`](flair-cache-watch/README.md) — Watch / reactivity
 - [x] [`flair-cache-metrics`](flair-cache-metrics/README.md) — JMX metrics
-- [ ] `flair-cache` — FlairCache facade (final assembly)
+- [x] [`flair-cache`](flair-cache/README.md) — FlairCache facade (final assembly)
 - [ ] First stable release on Maven Central
 
 Watch / star the repository to be notified of the first release.

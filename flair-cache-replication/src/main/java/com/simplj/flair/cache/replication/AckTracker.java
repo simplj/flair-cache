@@ -44,6 +44,10 @@ final class AckTracker {
         }
     }
 
+    int pendingCount() {
+        return pending.size();
+    }
+
     void shutdown() {
         sweeper.shutdownNow();
         for (PendingWrite pw : pending.values()) {

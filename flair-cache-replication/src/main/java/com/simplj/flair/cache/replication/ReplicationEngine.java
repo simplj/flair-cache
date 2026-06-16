@@ -54,6 +54,15 @@ public final class ReplicationEngine {
         INCOMING.set(incoming);
     }
 
+    /**
+     * Returns {@code true} if the calling thread is currently inside an incoming replication
+     * apply operation (set by {@link #markIncoming(boolean)} or {@link IncomingHandler}).
+     * Safe to call from any thread — reads a {@link ThreadLocal}.
+     */
+    public static boolean isIncomingReplication() {
+        return INCOMING.get();
+    }
+
     private final UUID localNodeId;
     private final TcpServer transport;
     private final GossipNode cluster;
@@ -332,6 +341,11 @@ public final class ReplicationEngine {
     public long pendingFrameCount() {
         ReplicationFanout f = fanout;
         return f != null ? f.queueSize() : 0L;
+    }
+
+    /** Returns the number of replication frames sent but not yet ACK'd by the required quorum. */
+    public long pendingAckCount() {
+        return ackTracker.pendingCount();
     }
 
     /** Initiate an outgoing connection to a peer. Used by bootstrap and tests. */
