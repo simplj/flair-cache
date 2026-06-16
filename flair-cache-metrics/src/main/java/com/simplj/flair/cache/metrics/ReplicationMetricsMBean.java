@@ -6,7 +6,8 @@ import java.util.function.LongSupplier;
 
 public final class ReplicationMetricsMBean implements ReplicationMetricsMBeanInterface {
 
-    private final LongSupplier pendingSupplier;
+    private final LongSupplier pendingFramesSupplier;
+    private final LongSupplier pendingAckSupplier;
     private final LongAdder droppedFrames = new LongAdder();
     private final LongAdder ackTimeouts   = new LongAdder();
     private final LongAdder bytesSent     = new LongAdder();
@@ -16,8 +17,9 @@ public final class ReplicationMetricsMBean implements ReplicationMetricsMBeanInt
     private final AtomicLong maxLagMs     = new AtomicLong(0L);
 
     // Package-private: created via MetricsRegistry.withReplication(engine)
-    ReplicationMetricsMBean(LongSupplier pendingSupplier) {
-        this.pendingSupplier = pendingSupplier;
+    ReplicationMetricsMBean(LongSupplier pendingFramesSupplier, LongSupplier pendingAckSupplier) {
+        this.pendingFramesSupplier = pendingFramesSupplier;
+        this.pendingAckSupplier    = pendingAckSupplier;
     }
 
     public void recordDroppedFrame()            { droppedFrames.increment(); }
@@ -43,7 +45,8 @@ public final class ReplicationMetricsMBean implements ReplicationMetricsMBeanInt
         return count == 0 ? 0L : lagSumMs.sum() / count;
     }
     @Override public long getMaxReplicationLagMs() { return maxLagMs.get(); }
-    @Override public long getPendingFrameCount()   { return pendingSupplier.getAsLong(); }
+    @Override public long getPendingFrameCount()   { return pendingFramesSupplier.getAsLong(); }
+    @Override public long getPendingAckCount()     { return pendingAckSupplier.getAsLong(); }
     @Override public long getDroppedFrameCount()   { return droppedFrames.sum(); }
     @Override public long getAckTimeoutCount()     { return ackTimeouts.sum(); }
     @Override public long getBytesSentTotal()      { return bytesSent.sum(); }

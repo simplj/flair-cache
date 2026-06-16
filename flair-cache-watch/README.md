@@ -121,7 +121,36 @@ ChangeEvent.DeleteEvent<K, V>(K key, V lastValue, Source source)
 ChangeEvent.ExpireEvent<K, V>(K key, V lastValue)
 ```
 
-`Source.LOCAL` means the write originated on this node. `Source.REPLICATED` means it arrived from a peer over TCP. TTL expiry is always `LOCAL` — it is driven by the local expiry sweep and never replicated directly.
+`Source` describes how the **current process** learned about the data — the delivery mechanism, not who originally authored the write.
+
+| Source | Meaning |
+|---|---|
+| `LOCAL` | The calling thread invoked a write directly on this node in this process (e.g. `CacheBlock.put()`). |
+| `REPLICATED` | The data arrived via the network: a live replication frame from a peer, or a bootstrap snapshot during cluster join. |
+
+TTL expiry is always `LOCAL` — it is driven by the local expiry sweep and never replicated directly.
+
+**Bootstrap replay and self-authored entries**
+
+When a node restarts and joins the cluster, it receives a point-in-time snapshot from a donor peer (`bootstrapSync()`). Entries in that snapshot fire as `Source.REPLICATED` — even if this node originally authored them before the restart. This is intentional:
+
+- The current process has no memory of the previous write. The data arrived from the network, not from a local `put()` call.
+- Using `REPLICATED` is consistent with how DELETE events are sourced (both use the `INCOMING` thread-local flag, not `originNodeId`).
+- A subscriber that fans out to an external system on `Source.LOCAL` would silently skip bootstrap-replayed entries, leaving the external system out of sync after a restart.
+
+If you need to know whether **this node was the original author** regardless of how the data arrived, inspect `event.originNodeId()` directly:
+
+```java
+registry.watch()
+    .onEvent(event -> {
+        if (event instanceof ChangeEvent.PutEvent<String, Order> put) {
+            boolean isOriginalAuthor = myNodeId.equals(put.originNodeId());
+            // isOriginalAuthor is true for bootstrap replay of self-written entries;
+            // put.source() == REPLICATED for those same events.
+        }
+    })
+    .register();
+```
 
 Pattern-match in your listener with `instanceof`:
 

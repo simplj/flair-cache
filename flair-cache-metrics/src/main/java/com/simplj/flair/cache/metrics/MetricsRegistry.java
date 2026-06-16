@@ -104,18 +104,18 @@ public final class MetricsRegistry {
      * reference from becoming stale.
      */
     public ReplicationMetricsMBean withReplication(ReplicationEngine engine) {
-        return withReplication(engine::pendingFrameCount);
+        return withReplication(engine::pendingFrameCount, engine::pendingAckCount);
     }
 
     // Package-private: for testing and internal use where a full ReplicationEngine is not available
-    ReplicationMetricsMBean withReplication(LongSupplier pendingSupplier) {
+    ReplicationMetricsMBean withReplication(LongSupplier pendingFrames, LongSupplier pendingAcks) {
         synchronized (configLock) {
             if (replicationBean != null) {
                 log.warning("MetricsRegistry.withReplication() called more than once — " +
                         "returning existing ReplicationMetricsMBean to preserve accumulated lag/drop history.");
                 return replicationBean;
             }
-            replicationBean = new ReplicationMetricsMBean(pendingSupplier);
+            replicationBean = new ReplicationMetricsMBean(pendingFrames, pendingAcks);
             registrar.registerReplicationMetrics(replicationBean);
             return replicationBean;
         }

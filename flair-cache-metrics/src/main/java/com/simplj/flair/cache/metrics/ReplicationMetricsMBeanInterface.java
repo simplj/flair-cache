@@ -7,6 +7,7 @@ public interface ReplicationMetricsMBeanInterface {
     long getAvgReplicationLagMs();
     long getMaxReplicationLagMs();
     long getPendingFrameCount();
+    long getPendingAckCount();
     long getDroppedFrameCount();
     long getAckTimeoutCount();
     long getBytesSentTotal();

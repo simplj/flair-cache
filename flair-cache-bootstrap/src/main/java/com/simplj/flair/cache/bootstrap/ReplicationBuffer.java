@@ -90,7 +90,15 @@ public final class ReplicationBuffer {
                     block.putRaw(put.key(), winner);
                 }
             } else if (event instanceof ReplicationEvent.DeleteEvent del) {
-                block.deleteRaw(del.key());
+                // LWW guard: reject stale deletes that arrived in the buffer before
+                // a newer snapshot entry was applied by applyChunk(). Without this guard,
+                // a DELETE(hlc=t2) buffered before a snapshot PUT(hlc=t3) would silently
+                // delete the newer entry during drain, which is the mirror of the PUT LWW
+                // check above.
+                CacheEntry existing = block.getRaw(del.key());
+                if (existing == null || existing.hlc().compareTo(del.hlc()) <= 0) {
+                    block.deleteRaw(del.key());
+                }
             }
         } finally {
             ReplicationEngine.markIncoming(false);

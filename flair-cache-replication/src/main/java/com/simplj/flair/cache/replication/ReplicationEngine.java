@@ -79,6 +79,10 @@ public final class ReplicationEngine {
     private final IncomingHandler incomingHandler;
     private final AckTracker ackTracker;
     private final AtomicLong frameIdGen = new AtomicLong(0);
+    // Cached composed lookup: checks attachedBlocks first, then blockResolver.
+    // Created once in the constructor — captures the stable map reference, not a snapshot,
+    // so dynamically attached blocks are always visible to incoming frame handlers.
+    private final Function<String, CacheBlock<?, ?>> cachedBlockLookup;
     private final AtomicBoolean started = new AtomicBoolean(false);
 
     private volatile PeerRegistry peerRegistry;
@@ -102,6 +106,14 @@ public final class ReplicationEngine {
         this.keepalivePongTimeoutMs = b.keepalivePongTimeoutMs;
         this.incomingHandler        = b.incomingHandler;
         this.ackTracker       = new AckTracker();
+        // Capture live map reference so blocks added after build() via attachBlock() are visible.
+        final ConcurrentHashMap<String, CacheBlock<?, ?>> liveBlocks = this.attachedBlocks;
+        final Function<String, CacheBlock<?, ?>> resolver = this.blockResolver;
+        this.cachedBlockLookup = name -> {
+            CacheBlock<?, ?> b2 = liveBlocks.get(name);
+            if (b2 != null) return b2;
+            return resolver != null ? resolver.apply(name) : null;
+        };
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -342,16 +354,13 @@ public final class ReplicationEngine {
     /**
      * Returns a composed lookup: checks {@link #attachedBlocks} first (registered via
      * {@link #attachBlock}), then falls back to the builder-provided {@code blockLookup} function.
+     * The lambda is cached at construction time — no allocation on the call site.
      */
     Function<String, CacheBlock<?, ?>> blockLookup() {
-        return name -> {
-            CacheBlock<?, ?> b = attachedBlocks.get(name);
-            if (b != null) return b;
-            return blockResolver != null ? blockResolver.apply(name) : null;
-        };
+        return cachedBlockLookup;
     }
 
-    Consumer<ReplicationEvent> incomingCallback() { return incomingCallback; }
+    public Consumer<ReplicationEvent> incomingCallback() { return incomingCallback; }
 
     AckTracker ackTracker() { return ackTracker; }
 

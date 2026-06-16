@@ -90,11 +90,18 @@ public final class FlairCluster {
     }
 
     /**
-     * Polls all nodes until pending replication frames across the entire cluster drop to zero,
-     * or until {@code timeout} elapses. Pending frames reaching zero is a strong signal that
-     * in-flight writes have been delivered to all connected peers.
+     * Polls all nodes until pending replication frames and in-flight ACKs across the entire
+     * cluster drop to zero, or until {@code timeout} elapses.
      *
-     * @throws IllegalStateException if replication has not drained before the timeout
+     * <p>Two conditions are checked per node:
+     * <ul>
+     *   <li>{@code pendingFrameCount == 0} — no frames waiting in the fanout queue to be
+     *       distributed to per-peer write queues.</li>
+     *   <li>{@code pendingAckCount == 0} — no QUORUM/STRONG frames awaiting ACKs from peers.
+     *       When this reaches zero, all required peers have confirmed receipt at the store layer.</li>
+     * </ul>
+     *
+     * @throws IllegalStateException if replication has not fully settled before the timeout
      */
     public void awaitReplication(Duration timeout) {
         Objects.requireNonNull(timeout, "timeout must not be null");
@@ -102,8 +109,8 @@ public final class FlairCluster {
         while (System.currentTimeMillis() < deadlineMs) {
             boolean allQuiet = true;
             for (FlairCache node : nodes) {
-                if (node.metrics().replicationMetrics() != null
-                        && node.metrics().replicationMetrics().getPendingFrameCount() > 0) {
+                var rm = node.metrics().replicationMetrics();
+                if (rm != null && (rm.getPendingFrameCount() > 0 || rm.getPendingAckCount() > 0)) {
                     allQuiet = false;
                     break;
                 }

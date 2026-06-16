@@ -12,6 +12,8 @@ import com.simplj.flair.cache.gossip.GossipNode;
 import com.simplj.flair.cache.gossip.MembershipList;
 import com.simplj.flair.cache.hlc.HybridLogicalClock;
 import com.simplj.flair.cache.metrics.MetricsRegistry;
+import com.simplj.flair.cache.metrics.ReplicationMetricsMBean;
+import com.simplj.flair.cache.replication.ReplicationEvent;
 import com.simplj.flair.cache.replication.ConsistencyMode;
 import com.simplj.flair.cache.replication.ReplicationEngine;
 import com.simplj.flair.cache.serial.Codec;
@@ -37,6 +39,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
@@ -91,10 +94,11 @@ public final class FlairCache implements Closeable {
     private final ReentrantLock bootstrapSyncLock = new ReentrantLock();
 
     // Initialized in start(); volatile for safe publication to other threads.
-    private volatile HybridLogicalClock hlc;
-    private volatile TcpServer          tcpServer;
-    private volatile GossipNode         gossipNode;
-    private volatile ReplicationEngine  replicationEngine;
+    private volatile HybridLogicalClock      hlc;
+    private volatile TcpServer               tcpServer;
+    private volatile GossipNode              gossipNode;
+    private volatile ReplicationEngine       replicationEngine;
+    private volatile ReplicationMetricsMBean replMetrics;
 
     // Package-private: FlairCacheBuilder.build() calls this; not for direct instantiation.
     FlairCache(FlairCacheConfig config) {
@@ -353,7 +357,13 @@ public final class FlairCache implements Closeable {
         bootstrapSyncLock.lock();
         try {
             ReplicationBuffer buffer = new ReplicationBuffer();
-            replicationEngine.onIncoming(buffer::offer);
+            // Compose with the existing callback (e.g. the lag-metric sink wired in doStart)
+            // so bootstrap buffering does not permanently discard any pre-registered listener.
+            Consumer<ReplicationEvent> previous = replicationEngine.incomingCallback();
+            replicationEngine.onIncoming(event -> {
+                buffer.offer(event);
+                if (previous != null) previous.accept(event);
+            });
             try {
                 BootstrapSync.builder()
                         .blocks(syncBlocks)
@@ -364,7 +374,7 @@ public final class FlairCache implements Closeable {
                         .build()
                         .syncFromPeer();
             } finally {
-                replicationEngine.onIncoming(null);
+                replicationEngine.onIncoming(previous); // restore, not null
             }
         } finally {
             bootstrapSyncLock.unlock();
@@ -520,8 +530,9 @@ public final class FlairCache implements Closeable {
         // Step 9: Wire replication metrics. Route discarded-frame counts (from dead-peer queue
         // draining) into the DroppedFrameCount metric — replication cannot depend on the metrics
         // module, so the facade bridges the two here.
-        com.simplj.flair.cache.metrics.ReplicationMetricsMBean replMetrics =
-                metricsRegistry.withReplication(engine);
+        // replMetrics is stored as an instance field so BlockBuilder.build() PutListeners can
+        // record per-write replication lag without requiring a separate onIncoming() callback slot.
+        replMetrics = metricsRegistry.withReplication(engine);
         engine.onFramesDropped(n -> {
             for (long i = 0; i < n; i++) {
                 replMetrics.recordDroppedFrame();
@@ -679,18 +690,55 @@ public final class FlairCache implements Closeable {
             UUID localNodeId = cache.config.nodeId();
 
             block.addPutListener((rawKey, entry) -> {
+                // Source determination: INCOMING flag takes priority over originNodeId.
+                //
+                // Source.LOCAL  — the calling thread invoked block.put() directly on this node,
+                //                 in this process. originNodeId is null for these writes.
+                // Source.REPLICATED — the write arrived via the network: a peer's replication frame
+                //                 (IncomingHandler sets INCOMING=true) or a bootstrap snapshot
+                //                 (BootstrapSync.applyChunk sets INCOMING=true).
+                //
+                // NOTE — self-authored entries received during bootstrap replay fire as REPLICATED,
+                // not LOCAL, even when originNodeId == localNodeId (i.e. this node wrote the entry
+                // before a restart and now receives it back from a donor peer). This is intentional:
+                //   1. Consistency — DeleteListener uses the same INCOMING signal. Using originNodeId
+                //      for PUT but INCOMING for DELETE would give different semantics to the same
+                //      concept in the same listener registration block.
+                //   2. Delivery mechanism, not authorship — Source describes how the current *process*
+                //      learned about the data, not who originally authored it. After a restart this
+                //      process has no memory of the previous write; the data arrived from the network.
+                //   3. Safety for external fan-out — a subscriber that writes to an external system
+                //      on Source.LOCAL would silently skip bootstrap-replayed entries, potentially
+                //      leaving the external system out of sync after a node restart.
+                // Watch subscribers that need to distinguish "this node is the original author"
+                // from "this data arrived from the network" should inspect
+                // event.originNodeId().equals(localNodeId) directly.
+                boolean isIncoming = ReplicationEngine.isIncomingReplication();
+                UUID origin = entry.originNodeId();
+                ChangeEvent.Source src = (!isIncoming && (origin == null || localNodeId.equals(origin)))
+                        ? ChangeEvent.Source.LOCAL
+                        : ChangeEvent.Source.REPLICATED;
+
+                // Record replication lag before codec work so the metric captures the full
+                // processing overhead, not just the dispatch time.
+                if (src == ChangeEvent.Source.REPLICATED) {
+                    ReplicationMetricsMBean rm = cache.replMetrics;
+                    if (rm != null) {
+                        rm.recordReplicationLag(System.currentTimeMillis() - entry.hlc().logical());
+                    }
+                }
+
                 // Guard: skip codec work entirely when no subscribers exist.
                 if (entry.value() == null || !watchRegistry.hasSubscribers()) return;
                 try {
                     K key = kc.deserialize(ByteBuffer.wrap(rawKey));
                     V val = vc.deserialize(ByteBuffer.wrap(entry.value()));
-                    // originNodeId is null for local writes (LocalStore.put sets null);
-                    // non-null and different from localNodeId for frames decoded from the wire.
-                    UUID origin = entry.originNodeId();
-                    ChangeEvent.Source src = (origin == null || localNodeId.equals(origin))
-                            ? ChangeEvent.Source.LOCAL
-                            : ChangeEvent.Source.REPLICATED;
-                    watchRegistry.dispatch(new ChangeEvent.PutEvent<>(key, val, null, src));
+                    // Pass the HLC logical timestamp as the source timestamp for lag-aware
+                    // watch dispatch. -1L signals "no lag" to WatchRegistry for local writes.
+                    long srcTs = src == ChangeEvent.Source.REPLICATED
+                            ? entry.hlc().logical()
+                            : -1L;
+                    watchRegistry.dispatch(new ChangeEvent.PutEvent<>(key, val, null, src), srcTs);
                 } catch (Exception e) {
                     if (log.isLoggable(Level.FINEST)) {
                         log.finest("Watch dispatch error for PUT block=" + name + ": " + e);

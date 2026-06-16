@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ReplicationMetricsMBeanTest {
 
     private ReplicationMetricsMBean bean() {
-        return new ReplicationMetricsMBean(() -> 0L);
+        return new ReplicationMetricsMBean(() -> 0L, () -> 0L);
     }
 
     @Test
@@ -16,6 +16,7 @@ class ReplicationMetricsMBeanTest {
         assertEquals(0L, b.getAvgReplicationLagMs());
         assertEquals(0L, b.getMaxReplicationLagMs());
         assertEquals(0L, b.getPendingFrameCount());
+        assertEquals(0L, b.getPendingAckCount());
         assertEquals(0L, b.getDroppedFrameCount());
         assertEquals(0L, b.getAckTimeoutCount());
         assertEquals(0L, b.getBytesSentTotal());
@@ -72,8 +73,14 @@ class ReplicationMetricsMBeanTest {
 
     @Test
     void pendingFrameCountDelegatestoSupplier() {
-        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 42L);
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 42L, () -> 0L);
         assertEquals(42L, b.getPendingFrameCount());
+    }
+
+    @Test
+    void pendingAckCountDelegatesToSupplier() {
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 0L, () -> 7L);
+        assertEquals(7L, b.getPendingAckCount());
     }
 
     @Test
