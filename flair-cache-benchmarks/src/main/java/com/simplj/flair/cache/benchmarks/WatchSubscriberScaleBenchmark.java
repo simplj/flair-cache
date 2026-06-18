@@ -20,19 +20,21 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Benchmarks {@link WatchRegistry#dispatch(ChangeEvent)} as subscriber count scales.
+ * Benchmarks {@link WatchRegistry#dispatch(ChangeEvent)} as async subscriber count scales.
  *
- * <p>{@code WatchRegistry} guarantees dispatch completes in &lt; 500 ns regardless of
- * subscriber count: the hot path per subscription is one key-filter check and one
- * non-blocking {@link java.util.concurrent.ArrayBlockingQueue#offer} call.
- * This benchmark verifies that claim at 1, 5, 10, and 50 subscribers.</p>
+ * <p>{@code WatchRegistry} guarantees dispatch returns in O(1) regardless of subscriber count:
+ * the calling thread enqueues one {@code DispatchWork} to a single {@code ConcurrentLinkedQueue}
+ * inbox and unparks the dedicated {@code flaircache-watch-dispatch} fan-out thread.
+ * All per-subscriber work ({@code N} key-filter checks + {@code N} {@code ABQ.offer()} calls)
+ * runs asynchronously on that fan-out thread.
+ * This benchmark verifies the O(1) claim at 1, 5, 10, and 50 subscribers.</p>
  *
  * <p>Unlike {@link WatchDispatchBenchmark} (fixed at 5 subscribers), this benchmark uses
  * {@code @Param} so JMH reports separate percentile distributions for each count.
- * Compare the p99 column across param values to detect O(n) deviation from the &lt; 500 ns SLA.</p>
+ * Compare the p50 and p99 columns across param values — they should be flat, not O(n).</p>
  *
  * <p>Uses {@link WatchRegistry} directly — no {@link com.simplj.flair.cache.FlairCache}
- * required. Each async subscriber gets its own drain thread backed by the watch thread pool.</p>
+ * required. Each async subscriber gets its own drain thread via {@link java.util.concurrent.ArrayBlockingQueue}.</p>
  */
 @State(Scope.Benchmark)
 @BenchmarkMode({Mode.SampleTime, Mode.Throughput})
@@ -72,9 +74,9 @@ public class WatchSubscriberScaleBenchmark {
 
     /**
      * Dispatches one PUT event to {@code subscriberCount} async subscribers.
-     * Hot path: {@code subscriberCount} key-filter checks (null → always pass) +
-     * {@code subscriberCount} non-blocking {@code offer()} calls to per-subscription queues.
-     * All I/O-bound work runs on the subscriber drain threads, not in this call.
+     * Calling-thread hot path (O(1), subscriber-count-independent):
+     *   1 CLQ.offer to the registry inbox + 1 LockSupport.unpark of the fan-out thread.
+     * The fan-out thread handles the O(N) work asynchronously.
      */
     @Benchmark
     public void dispatch() {

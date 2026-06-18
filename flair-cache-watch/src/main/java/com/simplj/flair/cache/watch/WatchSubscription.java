@@ -154,6 +154,10 @@ final class WatchSubscription<K, V> {
         return active.get();
     }
 
+    boolean isAsync() {
+        return async;
+    }
+
     long eventsReceived() {
         return eventsReceived.sum();
     }

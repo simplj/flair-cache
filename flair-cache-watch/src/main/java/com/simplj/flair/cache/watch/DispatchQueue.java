@@ -57,7 +57,8 @@ final class DispatchQueue<K, V> {
             if (!queue.offer(event)) {     // re-offer; can still fail under high concurrency
                 droppedCounter.increment();
                 if (log.isLoggable(Level.WARNING)) {
-                    log.warning("Watch[" + subscriptionId + "] re-offer after eviction also failed — new event dropped");
+                    log.warning("Watch[" + subscriptionId
+                            + "] re-offer after eviction also failed — new event dropped");
                 }
             }
         }
