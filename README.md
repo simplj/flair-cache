@@ -4,7 +4,6 @@
 
 > Distributed. Embedded. Zero infrastructure. Every node. Full data. Zero network.
 
-[![Build](https://github.com/arunavas/flair-cache/actions/workflows/build.yml/badge.svg)](https://github.com/arunavas/flair-cache/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-17%2B-orange.svg)](https://openjdk.org/)
 [![Status](https://img.shields.io/badge/Status-V1%20Complete-brightgreen.svg)]()
