@@ -285,17 +285,17 @@ Measured via JMH microbenchmarks. Full results and methodology in [BENCHMARK.md]
 
 | Operation | p99 (measured) | Target | vs. Target |
 |---|---|---|---|
-| `get()` local hit | 251ns | < 200ns | At target — sub-µs, always |
-| `put()` + async replication enqueue | 11,392ns | < 500ns | Includes HLC stamp + enqueue |
-| DSL `where().fetch()` (10k entries) | 606µs | < 5ms | **8× better** |
-| DSL `join()` (10k × 10k entries) | 2.0ms | < 50ms | **25× better** |
-| Frame encode (1KB payload) | 119ns | < 1µs | **8× better** |
-| QUORUM write (3-node, loopback) | 2.53ms | — | includes network round-trip |
-| Watch dispatch (50 subscribers) | 362ns | — | constant — does not scale with subscriber count |
+| `get()` local hit | 188ns | < 200ns | Under target — sub-µs, always |
+| `put()` + async replication enqueue | 8,464ns | < 500ns | Includes HLC stamp + enqueue |
+| DSL `where().fetch()` (10k entries) | 203µs | < 5ms | **25× better** |
+| DSL `join()` (10k × 10k entries) | 1.34ms | < 50ms | **37× better** |
+| Frame encode (1KB payload) | 95ns | < 1µs | **10× better** |
+| QUORUM write (3-node, loopback) | 2.48ms | — | includes network round-trip |
+| Watch dispatch (50 subscribers) | 365ns | — | constant — does not scale with subscriber count |
 
 > `put()` p99 reflects the full local write path: HLC timestamp generation, store write, and async
 > replication enqueue. The replication enqueue itself is non-blocking — it does not wait for peers.
-> For read-heavy workloads, `get()` at 251ns is the number that matters.
+> For read-heavy workloads, `get()` at 188ns is the number that matters.
 
 ---
 
