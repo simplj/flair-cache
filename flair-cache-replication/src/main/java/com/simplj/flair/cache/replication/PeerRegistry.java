@@ -7,6 +7,7 @@ import com.simplj.flair.cache.transport.Connection;
 import com.simplj.flair.cache.transport.NioEventLoop;
 import com.simplj.flair.cache.transport.RawFrame;
 import com.simplj.flair.cache.transport.TcpClient;
+import com.simplj.flair.cache.transport.TlsConfig;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -14,6 +15,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,16 +32,30 @@ final class PeerRegistry implements MembershipListener {
 
     private static final Logger log = Logger.getLogger(PeerRegistry.class.getName());
 
+    // Maximum number of frames to hold per peer while its TCP connection (and TLS handshake, if
+    // enabled) is still establishing. If this limit is reached, the oldest frame is dropped
+    // (DROP_OLDEST policy) and a WARNING is emitted. The buffer is flushed in insertion order
+    // once the connection completes.
+    private static final int PENDING_BUFFER_CAPACITY = 1024;
+
     private final UUID localNodeId;
     private final NioEventLoop sharedEventLoop;
-    private final ConcurrentHashMap<UUID, Connection> outgoing    = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<UUID, Long>       lastPongMs  = new ConcurrentHashMap<>();
+    private volatile TlsConfig tlsConfig = TlsConfig.disabled();
+    private final ConcurrentHashMap<UUID, Connection>                  outgoing      = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Long>                        lastPongMs    = new ConcurrentHashMap<>();
     // In-flight guard: prevents submitting a new doConnect while one is already running per peer.
-    private final Set<UUID>                           connecting  = ConcurrentHashMap.newKeySet();
+    private final Set<UUID>                                            connecting    = ConcurrentHashMap.newKeySet();
     // Earliest wall-clock time at which the next connect attempt is permitted per peer.
-    private final ConcurrentHashMap<UUID, Long>       nextRetryMs = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Long>                        nextRetryMs   = new ConcurrentHashMap<>();
     // Consecutive failure count per peer — drives exponential backoff calculation.
-    private final ConcurrentHashMap<UUID, Integer>    failureCount = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, Integer>                     failureCount  = new ConcurrentHashMap<>();
+    // Per-peer bounded queue for frames produced while the TCP connection is still establishing.
+    // Created when connectAsync() is first called for a peer; removed (and flushed) when the
+    // connection becomes alive. Cleared (frames discarded) when the peer leaves or is declared dead.
+    private final ConcurrentHashMap<UUID, ArrayBlockingQueue<RawFrame>> pendingBuffers = new ConcurrentHashMap<>();
+    // Tracks which connecting peers have already had their "buffering started" WARNING logged,
+    // so we emit one WARNING per connection-establishment window rather than one per frame.
+    private final Set<UUID>                                            loggedConnecting = ConcurrentHashMap.newKeySet();
     private final ExecutorService connectPool;
     private final AckTracker ackTracker;
 
@@ -67,6 +83,11 @@ final class PeerRegistry implements MembershipListener {
                 new FlairCacheThreadFactory("flaircache-peer-connect", true));
     }
 
+    /** Sets the TLS configuration to use for outgoing peer connections. Call before connectAsync(). */
+    void setTlsConfig(TlsConfig tls) {
+        this.tlsConfig = tls != null ? tls : TlsConfig.disabled();
+    }
+
     /** Registers a sink for the count of frames discarded when a dead peer's queue is drained. */
     void onFramesDropped(java.util.function.LongConsumer sink) {
         if (sink != null) this.onFramesDropped = sink;
@@ -81,6 +102,12 @@ final class PeerRegistry implements MembershipListener {
         if (node.id().equals(localNodeId)) return;
         Connection existing = outgoing.get(node.id());
         if (existing != null && existing.isAlive()) return;
+
+        // Pre-create the pending buffer before the in-flight guard so that frames produced
+        // between now and when doConnect() completes are held rather than dropped. Both the
+        // in-flight and backoff paths below return early, but the buffer must exist so that
+        // sendOrBuffer() can enqueue frames regardless of whether a connect is in progress.
+        pendingBuffers.computeIfAbsent(node.id(), k -> new ArrayBlockingQueue<>(PENDING_BUFFER_CAPACITY));
 
         // In-flight guard: if a doConnect is already running for this peer, skip.
         // The running attempt will update state (success clears backoff; failure sets it).
@@ -109,6 +136,38 @@ final class PeerRegistry implements MembershipListener {
         }
     }
 
+    /**
+     * Sends {@code frame} to the peer identified by {@code peerId} if a live TCP connection
+     * exists. If the peer is in the membership list but its connection (including any TLS
+     * handshake) has not yet completed, the frame is held in a bounded per-peer queue and
+     * flushed in insertion order once the connection becomes alive.
+     *
+     * <p>If the pending buffer is full (reached {@link #PENDING_BUFFER_CAPACITY}), the
+     * oldest buffered frame is discarded (DROP_OLDEST) and a WARNING is emitted.
+     * A WARNING is also emitted once per connection-establishment window when buffering starts.
+     */
+    void sendOrBuffer(UUID peerId, RawFrame frame) {
+        Connection conn = outgoing.get(peerId);
+        if (conn != null && conn.isAlive()) {
+            conn.send(frame);
+            return;
+        }
+        ArrayBlockingQueue<RawFrame> buf = pendingBuffers.get(peerId);
+        if (buf != null) {
+            if (!buf.offer(frame)) {
+                // Buffer full: drop oldest to make room (DROP_OLDEST policy).
+                buf.poll();
+                buf.offer(frame);
+                log.warning("Pending buffer for peer " + peerId + " reached capacity ("
+                        + PENDING_BUFFER_CAPACITY + " frames); dropped oldest frame");
+            } else if (loggedConnecting.add(peerId)) {
+                log.warning("Peer " + peerId
+                        + " has no TCP connection yet; buffering replication frames"
+                        + " until connection establishes");
+            }
+        }
+    }
+
     void sendAll(RawFrame frame) {
         for (Connection conn : outgoing.values()) {
             if (conn.isAlive()) {
@@ -127,6 +186,21 @@ final class PeerRegistry implements MembershipListener {
         return ids;
     }
 
+    /**
+     * Returns the IDs of all peers this registry knows about: peers with a live TCP connection
+     * ({@code outgoing}) plus peers whose connection is still establishing ({@code pendingBuffers}).
+     * Dead connections in {@code outgoing} are excluded. Use this to enumerate all fanout targets
+     * without restricting to only the already-connected subset.
+     */
+    List<UUID> knownPeerIds() {
+        java.util.Set<UUID> ids = new java.util.HashSet<>();
+        for (java.util.Map.Entry<UUID, Connection> e : outgoing.entrySet()) {
+            if (e.getValue().isAlive()) ids.add(e.getKey());
+        }
+        ids.addAll(pendingBuffers.keySet());
+        return new ArrayList<>(ids);
+    }
+
     Collection<Connection> aliveConnections() {
         List<Connection> conns = new ArrayList<>();
         for (Connection c : outgoing.values()) {
@@ -141,6 +215,19 @@ final class PeerRegistry implements MembershipListener {
             if (c.isAlive()) count++;
         }
         return count;
+    }
+
+    /**
+     * Returns the total number of frames sitting in per-peer write queues that have not yet
+     * been flushed to the underlying socket. A value of zero means every frame handed off by
+     * the fanout has been written to the OS TCP send buffer for all alive peers.
+     */
+    int pendingWriteCount() {
+        int total = 0;
+        for (Connection c : outgoing.values()) {
+            if (c.isAlive()) total += c.pendingWrites();
+        }
+        return total;
     }
 
     void onPong(UUID peerId) {
@@ -171,6 +258,8 @@ final class PeerRegistry implements MembershipListener {
 
     void disconnectPeer(UUID nodeId) {
         lastPongMs.remove(nodeId);
+        pendingBuffers.remove(nodeId);
+        loggedConnecting.remove(nodeId);
         Connection conn = outgoing.remove(nodeId);
         if (conn != null) {
             conn.close();
@@ -185,6 +274,8 @@ final class PeerRegistry implements MembershipListener {
      */
     void disconnectPeerGraceful(UUID nodeId) {
         lastPongMs.remove(nodeId);
+        pendingBuffers.remove(nodeId);
+        loggedConnecting.remove(nodeId);
         Connection conn = outgoing.remove(nodeId);
         if (conn != null) {
             conn.closeGraceful(leaveFlushTimeoutMs);
@@ -209,6 +300,18 @@ final class PeerRegistry implements MembershipListener {
                 }
             }
         }
+        // Discard any pending-buffer frames for this dead peer and count them as dropped.
+        ArrayBlockingQueue<RawFrame> buf = pendingBuffers.remove(nodeId);
+        loggedConnecting.remove(nodeId);
+        if (buf != null && !buf.isEmpty()) {
+            int bufDropped = buf.size();
+            buf.clear();
+            onFramesDropped.accept(bufDropped);
+            if (log.isLoggable(Level.FINE)) {
+                log.fine("Discarded " + bufDropped
+                        + " pending-buffer frame(s) for dead peer " + nodeId);
+            }
+        }
         reevaluateInFlight(nodeId);
     }
 
@@ -231,6 +334,8 @@ final class PeerRegistry implements MembershipListener {
         connecting.clear();
         nextRetryMs.clear();
         failureCount.clear();
+        pendingBuffers.clear();
+        loggedConnecting.clear();
     }
 
     // ── MembershipListener ────────────────────────────────────────────────────
@@ -289,11 +394,20 @@ final class PeerRegistry implements MembershipListener {
             // is multiplexed on one flaircache-nio-selector thread. The shared loop's
             // FrameHandler (IncomingHandler) is inherited automatically; frames from the peer
             // (ACKs, etc.) are dispatched through the same handler as server-side frames.
+            // For outgoing connections, use TLS if configured. Strip requireClientAuth since
+            // that flag is only meaningful on the server side (inbound connections). The same
+            // SSLContext can drive both server and client roles — it presents the node's cert
+            // to the remote server if the server requests it (mTLS), and verifies the server's
+            // cert using the truststore.
+            TlsConfig outboundTls = tlsConfig.isEnabled()
+                    ? TlsConfig.of(tlsConfig.sslContext())
+                    : TlsConfig.disabled();
             Connection conn = TcpClient.builder()
                     .remoteAddress(node.address().getHostAddress())
                     .remotePort(node.port())
                     .eventLoop(sharedEventLoop)
                     .connectTimeoutMs(3000)
+                    .tls(outboundTls)
                     .build()
                     .connect();
             Connection prev = outgoing.putIfAbsent(node.id(), conn);
@@ -307,6 +421,24 @@ final class PeerRegistry implements MembershipListener {
                 // Seed the pong timestamp so disconnectStalePeers gives this connection
                 // a full grace period before it expects a PONG reply.
                 lastPongMs.put(node.id(), System.currentTimeMillis());
+                // Flush any frames that were buffered while this connection (including TLS
+                // handshake, if configured) was establishing. The connection is already visible
+                // in outgoing, so the fanout may begin direct sends concurrently; LWW timestamps
+                // ensure correctness regardless of interleaving with buffered frames.
+                ArrayBlockingQueue<RawFrame> buf = pendingBuffers.remove(node.id());
+                loggedConnecting.remove(node.id());
+                if (buf != null && !buf.isEmpty()) {
+                    int flushed = 0;
+                    RawFrame pending;
+                    while ((pending = buf.poll()) != null) {
+                        conn.send(pending);
+                        flushed++;
+                    }
+                    if (log.isLoggable(Level.FINE)) {
+                        log.fine("Flushed " + flushed + " buffered frame(s) to peer "
+                                + node.id() + " at " + node.addressString());
+                    }
+                }
                 log.fine("Connected to peer " + node.id() + " at " + node.addressString());
             }
         } catch (IOException e) {

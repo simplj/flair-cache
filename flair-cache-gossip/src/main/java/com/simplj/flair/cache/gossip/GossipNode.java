@@ -382,12 +382,24 @@ public final class GossipNode {
     private void handleJoinAck(GossipMessage msg) {
         for (NodeInfo member : msg.piggybacked) {
             if (member.id().equals(nodeId)) continue;
-            boolean isNew    = members.find(member.id()).isEmpty();
+            Optional<NodeInfo> existing = members.find(member.id());
+            boolean isNew    = existing.isEmpty();
             boolean accepted = members.addOrUpdate(member);
             if (accepted) {
                 piggyback.add(member);  // schedule for epidemic re-dissemination from this joiner
             }
-            if (isNew && accepted) notifyListeners(l -> l.onJoin(member));
+            if (isNew && accepted) {
+                notifyListeners(l -> l.onJoin(member));
+            } else if (!isNew && accepted && member.status() == NodeStatus.ALIVE
+                    && existing.get().status() == NodeStatus.SUSPECTED) {
+                // ALIVE(higher-inc) from the JOIN_ACK snapshot dominated our SUSPECTED state.
+                // addOrUpdate updated the membership list, but suspicion state must also be cleared
+                // here: without it, checkSuspicionTimeouts() continues to tick and will eventually
+                // declare this node DEAD even though the snapshot proves it is alive.
+                suspectedSince.remove(member.id());
+                failureDetector.clear(member.id());
+                notifyListeners(l -> l.onRecover(member));
+            }
         }
     }
 

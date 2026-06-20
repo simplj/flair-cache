@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.simplj.flair</groupId>
+        <artifactId>flair-cache-parent</artifactId>
+        <version>${revision}</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>flair-cache-it</artifactId>
+    <name>FlairCache — Integration Tests</name>
+    <description>
+        End-to-end integration test suite covering all FlairCache functionality through the
+        FlairCache facade. All tests run in-JVM with an embedded FlairCluster — no Docker,
+        no external infrastructure required. Not published to Maven Central.
+    </description>
+
+    <properties>
+        <!-- Never install or deploy this module — it is a test harness only -->
+        <maven.install.skip>true</maven.install.skip>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
+    <dependencies>
+        <!-- Full FlairCache stack via the aggregate facade -->
+        <dependency>
+            <groupId>com.simplj.flair</groupId>
+            <artifactId>flair-cache</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                        GcCrosstalkIT runs a 30-second sustained-load window plus JMH-style
+                        measurement overhead. Allow 3 minutes per test class to prevent false
+                        timeouts when GC pauses are longer than expected on CI machines.
+                    -->
+                    <forkedProcessTimeoutInSeconds>180</forkedProcessTimeoutInSeconds>
+                    <!--
+                        Each integration-test class gets its own JVM fork so that leaked threads
+                        from one class cannot affect another, and JVM-level state (ports, MBeans,
+                        GC stats) is fully isolated between classes.
+                    -->
+                    <forkCount>1</forkCount>
+                    <reuseForks>false</reuseForks>
+                    <!--
+                        MaxGCPauseMillis=50: ask G1GC to target ≤50ms pauses so that
+                        stop-the-world events do not inflate p99 latency samples beyond
+                        the expected StampedLock-contention baseline (~1–3 µs after warmup).
+                    -->
+                    <argLine>-Xmx512m -Xms128m -XX:MaxGCPauseMillis=50</argLine>
+                    <includes>
+                        <include>**/*IT.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -104,18 +104,33 @@ public final class MetricsRegistry {
      * reference from becoming stale.
      */
     public ReplicationMetricsMBean withReplication(ReplicationEngine engine) {
-        return withReplication(engine::pendingFrameCount);
+        return withReplication(engine::pendingFrameCount, engine::pendingAckCount,
+                               engine::pendingWriteCount,
+                               engine::totalFramesDistributed, engine::totalFramesApplied);
     }
 
-    // Package-private: for testing and internal use where a full ReplicationEngine is not available
-    ReplicationMetricsMBean withReplication(LongSupplier pendingSupplier) {
+    // Package-private: for testing and internal use where a full ReplicationEngine is not available.
+    // The 2-arg overload defaults pending/total suppliers to zero.
+    ReplicationMetricsMBean withReplication(LongSupplier pendingFrames, LongSupplier pendingAcks) {
+        return withReplication(pendingFrames, pendingAcks, () -> 0L, () -> 0L, () -> 0L);
+    }
+
+    ReplicationMetricsMBean withReplication(LongSupplier pendingFrames, LongSupplier pendingAcks,
+                                            LongSupplier pendingWrites) {
+        return withReplication(pendingFrames, pendingAcks, pendingWrites, () -> 0L, () -> 0L);
+    }
+
+    ReplicationMetricsMBean withReplication(LongSupplier pendingFrames, LongSupplier pendingAcks,
+                                            LongSupplier pendingWrites,
+                                            LongSupplier totalDistributed, LongSupplier totalApplied) {
         synchronized (configLock) {
             if (replicationBean != null) {
                 log.warning("MetricsRegistry.withReplication() called more than once — " +
                         "returning existing ReplicationMetricsMBean to preserve accumulated lag/drop history.");
                 return replicationBean;
             }
-            replicationBean = new ReplicationMetricsMBean(pendingSupplier);
+            replicationBean = new ReplicationMetricsMBean(pendingFrames, pendingAcks, pendingWrites,
+                                                          totalDistributed, totalApplied);
             registrar.registerReplicationMetrics(replicationBean);
             return replicationBean;
         }

@@ -57,6 +57,7 @@
         <module>flair-cache-metrics</module>
         <module>flair-cache</module>
         <module>flair-cache-benchmarks</module>
+        <module>flair-cache-it</module>
     </modules>
 
     <properties>

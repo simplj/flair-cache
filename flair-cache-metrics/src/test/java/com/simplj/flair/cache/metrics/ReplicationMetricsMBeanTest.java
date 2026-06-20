@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class ReplicationMetricsMBeanTest {
 
     private ReplicationMetricsMBean bean() {
-        return new ReplicationMetricsMBean(() -> 0L);
+        return new ReplicationMetricsMBean(() -> 0L, () -> 0L);
     }
 
     @Test
@@ -16,6 +16,10 @@ class ReplicationMetricsMBeanTest {
         assertEquals(0L, b.getAvgReplicationLagMs());
         assertEquals(0L, b.getMaxReplicationLagMs());
         assertEquals(0L, b.getPendingFrameCount());
+        assertEquals(0L, b.getPendingAckCount());
+        assertEquals(0L, b.getPendingWriteCount());
+        assertEquals(0L, b.getTotalFramesDistributed());
+        assertEquals(0L, b.getTotalFramesApplied());
         assertEquals(0L, b.getDroppedFrameCount());
         assertEquals(0L, b.getAckTimeoutCount());
         assertEquals(0L, b.getBytesSentTotal());
@@ -72,8 +76,45 @@ class ReplicationMetricsMBeanTest {
 
     @Test
     void pendingFrameCountDelegatestoSupplier() {
-        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 42L);
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 42L, () -> 0L);
         assertEquals(42L, b.getPendingFrameCount());
+    }
+
+    @Test
+    void pendingAckCountDelegatesToSupplier() {
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 0L, () -> 7L);
+        assertEquals(7L, b.getPendingAckCount());
+    }
+
+    @Test
+    void pendingWriteCountDelegatesToSupplier() {
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 0L, () -> 0L, () -> 13L);
+        assertEquals(13L, b.getPendingWriteCount());
+    }
+
+    @Test
+    void pendingWriteCountDefaultsToZeroForTwoArgConstructor() {
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 0L, () -> 0L);
+        assertEquals(0L, b.getPendingWriteCount());
+    }
+
+    @Test
+    void totalFramesDistributedDelegatesToSupplier() {
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 0L, () -> 0L, () -> 0L, () -> 42L, () -> 0L);
+        assertEquals(42L, b.getTotalFramesDistributed());
+    }
+
+    @Test
+    void totalFramesAppliedDelegatesToSupplier() {
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 0L, () -> 0L, () -> 0L, () -> 0L, () -> 7L);
+        assertEquals(7L, b.getTotalFramesApplied());
+    }
+
+    @Test
+    void totalFramesDefaultToZeroForTwoArgConstructor() {
+        ReplicationMetricsMBean b = new ReplicationMetricsMBean(() -> 0L, () -> 0L);
+        assertEquals(0L, b.getTotalFramesDistributed());
+        assertEquals(0L, b.getTotalFramesApplied());
     }
 
     @Test

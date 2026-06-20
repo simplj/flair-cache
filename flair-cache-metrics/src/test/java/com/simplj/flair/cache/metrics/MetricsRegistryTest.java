@@ -116,7 +116,7 @@ class MetricsRegistryTest {
         try (CacheBlock<String, byte[]> block = newBlock("full-sd")) {
             GossipNode node = GossipNode.builder().build();
             registry.registerBlock("full-sd", block); // CacheMetrics
-            registry.withReplication(() -> 0L);       // ReplicationMetrics
+            registry.withReplication(() -> 0L, () -> 0L);       // ReplicationMetrics
             registry.withCluster(node);               // ClusterMetrics
             // EvictionMetrics registered in MetricsRegistry constructor
 
@@ -132,7 +132,7 @@ class MetricsRegistryTest {
 
     @Test
     void replicationMetricsWiredViaWithReplication() {
-        ReplicationMetricsMBean bean = registry.withReplication(() -> 3L);
+        ReplicationMetricsMBean bean = registry.withReplication(() -> 3L, () -> 0L);
         assertNotNull(bean);
         assertSame(bean, registry.replicationMetrics());
         assertEquals(3L, bean.getPendingFrameCount());
@@ -176,11 +176,11 @@ class MetricsRegistryTest {
 
     @Test
     void withReplicationIdempotentReturnsSameBeanPreservingHistory() {
-        ReplicationMetricsMBean bean1 = registry.withReplication(() -> 5L);
+        ReplicationMetricsMBean bean1 = registry.withReplication(() -> 5L, () -> 0L);
         bean1.recordReplicationLag(100L);
         bean1.recordDroppedFrame();
 
-        ReplicationMetricsMBean bean2 = registry.withReplication(() -> 9L);
+        ReplicationMetricsMBean bean2 = registry.withReplication(() -> 9L, () -> 0L);
 
         assertSame(bean1, bean2, "Second withReplication() call must return the existing bean");
         assertEquals(100L, bean2.getAvgReplicationLagMs(),
@@ -327,7 +327,7 @@ class MetricsRegistryTest {
 
     @Test
     void avgReplicationLagMsDelegatesToBean() {
-        ReplicationMetricsMBean bean = registry.withReplication(() -> 0L);
+        ReplicationMetricsMBean bean = registry.withReplication(() -> 0L, () -> 0L);
         bean.recordReplicationLag(75L);
         assertEquals(75L, registry.avgReplicationLagMs(),
                 "avgReplicationLagMs() must delegate to the wired ReplicationMetricsMBean");

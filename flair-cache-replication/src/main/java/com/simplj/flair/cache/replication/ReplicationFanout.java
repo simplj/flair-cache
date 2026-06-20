@@ -3,16 +3,16 @@ package com.simplj.flair.cache.replication;
 import com.simplj.flair.cache.commons.FlairCacheThreadFactory;
 import com.simplj.flair.cache.gossip.MembershipList;
 import com.simplj.flair.cache.gossip.NodeInfo;
-import com.simplj.flair.cache.transport.Connection;
 import com.simplj.flair.cache.transport.RawFrame;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -32,6 +32,15 @@ final class ReplicationFanout implements Runnable {
     private final Thread thread;
     private final AtomicBoolean started = new AtomicBoolean(false);
     private volatile boolean running = true;
+    // Counts total per-peer frame sends: each fanout of 1 frame to N peers increments by N.
+    // Used by awaitReplication() to detect when all distributed frames have been applied.
+    private final LongAdder totalDistributed = new LongAdder();
+    // Tracks frames from offer() until after fanout() completes. Unlike queue.size() (which drops
+    // to 0 when the fanout thread polls the frame but before totalDistributed is incremented),
+    // this counter stays positive until fanout() finishes updating totalDistributed. This closes
+    // the race where awaitReplication() sees pendingFrameCount=0 and totalDist=0 simultaneously
+    // (0>=0 false positive) while a frame is between queue.poll() and fanout() completion.
+    private final AtomicInteger pendingFanout = new AtomicInteger(0);
 
     ReplicationFanout(PeerRegistry peerRegistry, MembershipList membershipList, UUID localNodeId,
                       long batchWindowMs, int batchMaxFrames) {
@@ -56,11 +65,20 @@ final class ReplicationFanout implements Runnable {
     }
 
     boolean offer(QueuedEvent event) {
-        return queue.offer(event);
+        pendingFanout.incrementAndGet(); // claim before enqueue
+        if (queue.offer(event)) {
+            return true;
+        }
+        pendingFanout.decrementAndGet(); // queue full — roll back
+        return false;
     }
 
     int queueSize() {
-        return queue.size();
+        return pendingFanout.get();
+    }
+
+    long totalDistributed() {
+        return totalDistributed.sum();
     }
 
     @Override
@@ -84,8 +102,15 @@ final class ReplicationFanout implements Runnable {
                 }
 
                 if (!batch.isEmpty()) {
-                    fanout(batch);
-                    batch.clear();
+                    int batchCount = batch.size();
+                    try {
+                        fanout(batch);
+                    } finally {
+                        // Decrement after fanout() — guarantees pendingFanout reaches 0 only
+                        // after totalDistributed has been updated for every frame in the batch.
+                        pendingFanout.addAndGet(-batchCount);
+                        batch.clear();
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -103,6 +128,8 @@ final class ReplicationFanout implements Runnable {
                 fanout(remaining);
             } catch (Exception e) {
                 log.log(Level.WARNING, "Final fanout flush error", e);
+            } finally {
+                pendingFanout.addAndGet(-remaining.size());
             }
         }
     }
@@ -117,10 +144,14 @@ final class ReplicationFanout implements Runnable {
     }
 
     private void fanout(List<QueuedEvent> batch) {
-        Collection<Connection> peers = peerRegistry.aliveConnections();
-        if (peers.isEmpty()) {
+        // Enumerate all known peers: both live TCP connections and peers whose connection
+        // (or TLS handshake) is still in progress. sendOrBuffer() delivers directly to
+        // live peers and holds frames in a bounded per-peer queue for connecting peers,
+        // flushing them in order once the connection becomes alive.
+        List<UUID> targets = peerRegistry.knownPeerIds();
+        if (targets.isEmpty()) {
             if (log.isLoggable(Level.FINEST)) {
-                log.finest("Fanout: no alive peers, dropping " + batch.size() + " events");
+                log.finest("Fanout: no known peers, skipping " + batch.size() + " event(s)");
             }
             return;
         }
@@ -128,12 +159,13 @@ final class ReplicationFanout implements Runnable {
         for (QueuedEvent queued : batch) {
             RawFrame frame = encode(queued);
             if (frame == null) continue;
-            for (Connection peer : peers) {
-                peer.send(frame);
+            for (UUID peerId : targets) {
+                peerRegistry.sendOrBuffer(peerId, frame);
+                totalDistributed.increment();
             }
             if (log.isLoggable(Level.FINEST)) {
                 log.finest("Fanned out frameId=" + queued.frameId()
-                        + " to " + peers.size() + " peer(s)");
+                        + " to " + targets.size() + " peer(s)");
             }
         }
     }

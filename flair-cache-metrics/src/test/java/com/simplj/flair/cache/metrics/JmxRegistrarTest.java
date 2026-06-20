@@ -93,7 +93,7 @@ class JmxRegistrarTest {
 
     @Test
     void replicationMetricsMBeanReadableViaJmx() throws Exception {
-        ReplicationMetricsMBean bean = new ReplicationMetricsMBean(() -> 7L);
+        ReplicationMetricsMBean bean = new ReplicationMetricsMBean(() -> 7L, () -> 0L);
         bean.recordDroppedFrame();
         bean.recordReplicationLag(25L);
 
@@ -124,7 +124,7 @@ class JmxRegistrarTest {
     void deregisterAllLeavesNoLeakedMBeans() throws Exception {
         try (CacheBlock<String, byte[]> block = newBlock("leak-test")) {
             registrar.registerCacheMetrics("leak-test", new CacheMetricsMBean(block));
-            registrar.registerReplicationMetrics(new ReplicationMetricsMBean(() -> 0L));
+            registrar.registerReplicationMetrics(new ReplicationMetricsMBean(() -> 0L, () -> 0L));
             registrar.registerEvictionMetrics(
                     new EvictionMetricsMBean(new ConcurrentHashMap<>()));
 
@@ -163,8 +163,8 @@ class JmxRegistrarTest {
         // not add the same ObjectName twice to the internal tracking set. If it did,
         // deregisterAll() would attempt to unregister the same name twice; with the Set-based
         // tracking the second attempt is silently skipped because the Set dedups the name.
-        ReplicationMetricsMBean bean1 = new ReplicationMetricsMBean(() -> 1L);
-        ReplicationMetricsMBean bean2 = new ReplicationMetricsMBean(() -> 2L);
+        ReplicationMetricsMBean bean1 = new ReplicationMetricsMBean(() -> 1L, () -> 0L);
+        ReplicationMetricsMBean bean2 = new ReplicationMetricsMBean(() -> 2L, () -> 0L);
 
         registrar.registerReplicationMetrics(bean1);
         registrar.registerReplicationMetrics(bean2); // replaces bean1 in JMX
