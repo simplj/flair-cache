@@ -45,8 +45,9 @@ public final class FlairCluster {
     }
 
     /**
-     * Starts all nodes in order (node 0 first). If any node fails to start, all
-     * previously started nodes are shut down before the exception propagates.
+     * Starts all nodes in order (node 0 first), then blocks until all nodes have discovered
+     * each other via SWIM gossip and established TCP replication connections. Tests can write
+     * immediately after this method returns.
      *
      * @return {@code this} for chaining: {@code FlairCluster.builder()...build().start()}
      * @throws IOException if any node cannot bind its port
@@ -68,7 +69,41 @@ public final class FlairCluster {
             if (e instanceof IOException) throw (IOException) e;
             throw new RuntimeException("FlairCluster start failed", e);
         }
+        awaitClusterFormed();
         return this;
+    }
+
+    /**
+     * Blocks until every node's SWIM membership list contains all {@code nodeCount} members
+     * (including itself) as ALIVE, then waits a short grace period for TCP replication connections
+     * to be fully established before returning. Times out after 15 seconds.
+     */
+    private void awaitClusterFormed() {
+        if (nodes.size() <= 1) return;
+        long deadlineMs = System.currentTimeMillis() + 15_000L;
+        int expected = nodes.size(); // each node's membership includes itself
+        while (System.currentTimeMillis() < deadlineMs) {
+            boolean allFormed = true;
+            for (FlairCache node : nodes) {
+                if (node.cluster().alive().size() < expected) {
+                    allFormed = false;
+                    break;
+                }
+            }
+            if (allFormed) {
+                // Give TCP replication connections a short window to become established
+                // after gossip has propagated membership.
+                LockSupport.parkNanos(200_000_000L); // 200ms
+                return;
+            }
+            LockSupport.parkNanos(20_000_000L); // 20ms
+        }
+        // Log actual state for diagnosis but do not throw — partial cluster may still work.
+        StringBuilder sb = new StringBuilder("Cluster did not fully form within 15s. Alive per node:");
+        for (int i = 0; i < nodes.size(); i++) {
+            sb.append(" node").append(i).append("=").append(nodes.get(i).cluster().alive().size());
+        }
+        log.warning(sb.toString());
     }
 
     /**
@@ -90,16 +125,21 @@ public final class FlairCluster {
     }
 
     /**
-     * Polls all nodes until pending replication frames and in-flight ACKs across the entire
-     * cluster drop to zero, or until {@code timeout} elapses.
+     * Polls all nodes until replication has fully settled, or until {@code timeout} elapses.
      *
-     * <p>Two conditions are checked per node:
-     * <ul>
-     *   <li>{@code pendingFrameCount == 0} — no frames waiting in the fanout queue to be
-     *       distributed to per-peer write queues.</li>
-     *   <li>{@code pendingAckCount == 0} — no QUORUM/STRONG frames awaiting ACKs from peers.
-     *       When this reaches zero, all required peers have confirmed receipt at the store layer.</li>
-     * </ul>
+     * <p>Four conditions are checked on every poll:
+     * <ol>
+     *   <li>{@code pendingFrameCount == 0} — no frames waiting in any fanout queue.</li>
+     *   <li>{@code pendingWriteCount == 0} — no frames sitting in a per-peer write queue;
+     *       all distributed frames have been handed to the OS TCP send buffer. Without this,
+     *       {@code awaitReplication()} could return while frames were still in the 2ms writer
+     *       batch window and had not yet left the JVM.</li>
+     *   <li>{@code pendingAckCount == 0} — no QUORUM/STRONG frames awaiting peer ACKs.</li>
+     *   <li>{@code sum(totalFramesApplied) >= sum(totalFramesDistributed)} — all frames that
+     *       were flushed to the OS have also been received and applied by the remote
+     *       {@code IncomingHandler} on each receiving node. This closes the gap between "frame
+     *       in OS buffer" and "frame applied to the remote store" without using a fixed delay.</li>
+     * </ol>
      *
      * @throws IllegalStateException if replication has not fully settled before the timeout
      */
@@ -107,15 +147,33 @@ public final class FlairCluster {
         Objects.requireNonNull(timeout, "timeout must not be null");
         long deadlineMs = System.currentTimeMillis() + timeout.toMillis();
         while (System.currentTimeMillis() < deadlineMs) {
+            // Phase 1: check that no frames are in-flight in any queue on any node.
             boolean allQuiet = true;
             for (FlairCache node : nodes) {
                 var rm = node.metrics().replicationMetrics();
-                if (rm != null && (rm.getPendingFrameCount() > 0 || rm.getPendingAckCount() > 0)) {
+                if (rm != null && (rm.getPendingFrameCount() > 0
+                        || rm.getPendingAckCount() > 0
+                        || rm.getPendingWriteCount() > 0)) {
                     allQuiet = false;
                     break;
                 }
             }
-            if (allQuiet) return;
+            // Phase 2: if all queues are empty, verify that all distributed frames have been
+            // applied by the remote workers. This closes the "frame in OS buffer but not yet
+            // applied" gap without a fixed sleep.
+            if (allQuiet) {
+                long totalDist = 0, totalAppl = 0;
+                for (FlairCache node : nodes) {
+                    var rm = node.metrics().replicationMetrics();
+                    if (rm != null) {
+                        totalDist += rm.getTotalFramesDistributed();
+                        totalAppl += rm.getTotalFramesApplied();
+                    }
+                }
+                if (totalAppl >= totalDist) {
+                    return;
+                }
+            }
             LockSupport.parkNanos(5_000_000L); // 5ms
         }
         throw new IllegalStateException(

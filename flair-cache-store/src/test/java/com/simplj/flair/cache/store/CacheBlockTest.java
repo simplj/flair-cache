@@ -166,30 +166,33 @@ class CacheBlockTest {
                 .maxEntries(3)
                 .build()) {
 
+            // Insert a, b, c with small delays so each has a distinct accessEpochMs at insertion.
+            // Insertion order: a (T0) < b (T1) < c (T2).
             b.put("a", val("1"));
-            Thread.sleep(LocalStore.LRU_UPDATE_GRANULARITY_MS + 50);
+            Thread.sleep(2);
             b.put("b", val("2"));
-            Thread.sleep(LocalStore.LRU_UPDATE_GRANULARITY_MS + 50);
+            Thread.sleep(2);
             b.put("c", val("3"));
+            Thread.sleep(2);
 
-            // access "a" now to refresh its timestamp
+            // get("a") stamps "a" with the current time T3 > T2, making it the most-recently-used.
+            // After this: recency order is b (T1) < c (T2) < a (T3).
             b.get("a");
-            Thread.sleep(LocalStore.LRU_UPDATE_GRANULARITY_MS + 50);
+            Thread.sleep(2);
 
-            // put a 4th entry to trigger eviction — "b" should be evicted (least recently accessed)
+            // Adding a 4th entry triggers eviction. "b" has the smallest accessEpochMs → evicted.
             b.put("d", val("4"));
 
-            // "b" is the oldest-accessed — it should have been evicted
-            // (Approximate LRU — we verify the eviction happened and total is <= maxEntries)
             assertTrue(b.stats().size() <= 3, "size must not exceed maxEntries after eviction");
-            assertNull(b.get("b"), "LRU victim 'b' should be evicted");
+            assertNull(b.get("b"), "'b' must be evicted — it is the least recently accessed");
+            assertNotNull(b.get("a"), "'a' must survive — get() promoted it to most-recently-used");
         }
     }
 
     // ── LFU eviction ─────────────────────────────────────────────────────────
 
     @Test
-    void lfuEvictsLeastFrequentlyUsed() throws Exception {
+    void lfuEvictsLeastFrequentlyUsed() {
         try (CacheBlock<String, byte[]> b = CacheBlock.<String, byte[]>builder()
                 .name("lfu")
                 .keyCodec(StringCodec.INSTANCE)
@@ -203,21 +206,17 @@ class CacheBlockTest {
             b.put("warm", val("0"));
             b.put("hot",  val("0"));
 
-            // Drive hit counts — each get() after LRU_UPDATE_GRANULARITY_MS increments hitCount
-            Thread.sleep(LocalStore.LRU_UPDATE_GRANULARITY_MS + 50);
+            // Every get() updates hitCount — no sleeps required.
+            // After these calls: hot.hitCount=2, warm.hitCount=1, cold.hitCount=0.
             b.get("hot");
-            Thread.sleep(LocalStore.LRU_UPDATE_GRANULARITY_MS + 50);
             b.get("hot");
-            Thread.sleep(LocalStore.LRU_UPDATE_GRANULARITY_MS + 50);
             b.get("warm");
-            Thread.sleep(LocalStore.LRU_UPDATE_GRANULARITY_MS + 50);
 
-            // 4th put triggers eviction — a zero-hit entry ("cold" or the new one) should be evicted.
-            // Verify high-frequency entries survive: both "warm" and "hot" must still be present.
+            // 4th put triggers eviction. The sampler sees all 3 entries and picks the lowest hitCount.
+            // "cold" (hitCount=0) is the least frequently used → evicted.
             b.put("new", val("x"));
 
             assertTrue(b.stats().size() <= 3, "size must not exceed maxEntries after eviction");
-            // "warm" (1 hit) and "hot" (2 hits) must survive; only a zero-hit entry is evicted
             assertNotNull(b.get("warm"), "warm (1 hit) must survive LFU eviction");
             assertNotNull(b.get("hot"),  "hot (2 hits) must survive LFU eviction");
         }
@@ -619,6 +618,38 @@ class CacheBlockTest {
 
             // getRaw must not apply expiry — the replication layer needs to read all entries
             assertNotNull(b.getRaw(key), "getRaw must return entries regardless of expiry");
+        }
+    }
+
+    // ── Bug-1 regression: localNodeId must be stamped on locally-written entries ──────────────
+    //
+    // Pre-fix, LocalStore.put() always passed null for originNodeId. Two nodes writing the same
+    // key at the same HLC timestamp both stored null → LWWConflictResolver mapped null → UUID(0,0)
+    // for both sides → effIncoming.compareTo(effExisting) == 0 → returns false (existing wins) on
+    // BOTH nodes, but each had a different "existing" → cluster divergence.
+    //
+    // Fix: LocalStore.put() now passes localNodeId so each node's entries carry a distinct UUID.
+    // Reverting that line (null instead of localNodeId) makes this test fail with:
+    //   expected: <...the-uuid...> but was: <null>
+
+    @Test
+    void put_stamps_localNodeId_on_entry_for_deterministic_lww_tiebreaking() {
+        UUID nodeId = new UUID(0xCAFEL, 0xBABEL);
+        try (CacheBlock<String, byte[]> b = CacheBlock.<String, byte[]>builder()
+                .name("stamp-test")
+                .keyCodec(StringCodec.INSTANCE)
+                .valueCodec(ByteArrayCodec.INSTANCE)
+                .localNodeId(nodeId)
+                .build()) {
+            b.put("k", val("v"));
+            // Use rawSnapshotEntries() to retrieve the CacheEntry — getRaw(byte[]) needs
+            // the codec-encoded key bytes, not raw "k".getBytes().
+            Map<byte[], CacheEntry> entries = b.rawSnapshotEntries();
+            assertEquals(1, entries.size(), "exactly one entry must be stored");
+            CacheEntry stored = entries.values().iterator().next();
+            assertEquals(nodeId, stored.originNodeId(),
+                    "put() must stamp the entry with localNodeId; without the fix originNodeId is null "
+                    + "and same-HLC writes from different nodes both resolve to UUID(0,0) → diverge");
         }
     }
 

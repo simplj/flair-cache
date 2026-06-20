@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -25,6 +26,11 @@ final class WriteQueue {
     private static final int WRITE_BUF_BYTES = 512 * 1024; // 512 KB pre-allocated per writer thread
 
     private final ArrayBlockingQueue<RawFrame> queue;
+    // Counts frames that are enqueued OR have been dequeued into the batch but not yet flushed
+    // to the socket. Incremented in enqueue(), decremented after flush() completes. This means
+    // pendingCount() returns 0 only when the OS send buffer has received every frame, not merely
+    // when the in-memory queue is empty (which happens before the 2ms batch window elapses).
+    private final AtomicInteger pending = new AtomicInteger(0);
     private final BackpressurePolicy policy;
     private final SocketChannel channel;
     private final SSLEngine engine; // null for plaintext
@@ -61,29 +67,39 @@ final class WriteQueue {
         }
         switch (policy) {
             case BLOCK:
-                // Use offer() with timeout rather than put() so the loop can re-check
-                // writeFailed every millisecond. If put() were used and the writer thread died
-                // after the initial running/writeFailed check, the caller would block forever on
-                // a full queue that nothing is draining.
+                // Claim the pending slot BEFORE offering so that the drainLoop can never
+                // dequeue and batch the frame while pending is still 0. If offer() fails
+                // (shutdown or interrupt), decrement to undo the claim.
+                pending.incrementAndGet();
                 try {
                     while (!queue.offer(frame, 1, TimeUnit.MILLISECONDS)) {
                         if (!running || writeFailed) {
+                            pending.decrementAndGet();
                             return;
                         }
                     }
                 } catch (InterruptedException e) {
+                    pending.decrementAndGet();
                     Thread.currentThread().interrupt();
                 }
                 break;
             case DROP_OLDEST:
-                // Retry until the offer succeeds; each iteration makes space by polling the
-                // oldest frame. Under concurrent senders the loop may need more than one pass.
+                // Claim slot for the new frame first. Each evicted frame was already counted
+                // in pending when it was originally enqueued; decrement for it here since it
+                // will never be flushed.
+                pending.incrementAndGet();
                 while (!queue.offer(frame)) {
-                    queue.poll(); // evict oldest to make room
+                    if (queue.poll() != null) {
+                        pending.decrementAndGet();
+                    }
                 }
                 break;
             case DROP_NEWEST:
-                queue.offer(frame); // silently drops new frame if full
+                // Claim slot first; undo immediately if the frame is dropped.
+                pending.incrementAndGet();
+                if (!queue.offer(frame)) {
+                    pending.decrementAndGet();
+                }
                 break;
         }
     }
@@ -93,9 +109,12 @@ final class WriteQueue {
         worker.interrupt();
     }
 
-    /** Number of frames enqueued but not yet handed to the writer thread. */
+    /**
+     * Frames that are either in the queue OR have been dequeued into the batch but not yet
+     * flushed to the TCP socket. Returns 0 only when the OS send buffer has received every frame.
+     */
     int pendingCount() {
-        return queue.size();
+        return pending.get();
     }
 
     /**
@@ -172,7 +191,9 @@ final class WriteQueue {
                 boolean full = batch.size() >= BATCH_SIZE;
 
                 if ((timedOut || full) && !batch.isEmpty()) {
+                    int batchSize = batch.size();
                     flush(batch, writeBuf);
+                    pending.addAndGet(-batchSize);
                     batch.clear();
                     lastFlushNanos = now;
                 }
@@ -195,7 +216,9 @@ final class WriteQueue {
         // Flush whatever remains in the current batch
         if (!writeFailed && !batch.isEmpty()) {
             try {
+                int batchSize = batch.size();
                 flush(batch, writeBuf);
+                pending.addAndGet(-batchSize);
             } catch (IOException e) {
                 log.log(Level.WARNING, "Final batch flush error", e);
                 writeFailed = true;
@@ -210,7 +233,9 @@ final class WriteQueue {
                 batch.add(remaining);
                 if (batch.size() >= BATCH_SIZE) {
                     try {
+                        int batchSize = batch.size();
                         flush(batch, writeBuf);
+                        pending.addAndGet(-batchSize);
                     } catch (IOException e) {
                         log.log(Level.WARNING, "Drain flush error", e);
                         writeFailed = true;
@@ -221,7 +246,9 @@ final class WriteQueue {
             }
             if (!writeFailed && !batch.isEmpty()) {
                 try {
+                    int batchSize = batch.size();
                     flush(batch, writeBuf);
+                    pending.addAndGet(-batchSize);
                 } catch (IOException e) {
                     log.log(Level.WARNING, "Terminal drain flush error", e);
                 }

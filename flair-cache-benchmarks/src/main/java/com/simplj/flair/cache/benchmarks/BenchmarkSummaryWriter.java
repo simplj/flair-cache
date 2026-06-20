@@ -34,7 +34,7 @@ final class BenchmarkSummaryWriter {
 
     private BenchmarkSummaryWriter() {}
 
-    static void write(Collection<RunResult> results, String outputPath) throws IOException {
+    static void write(Collection<RunResult> results, EnvironmentInfo env, String outputPath) throws IOException {
         // Group SampleTime + Throughput RunResult pairs by (benchmarkName + params)
         Map<String, SummaryEntry> grouped = new LinkedHashMap<>();
         for (RunResult rr : results) {
@@ -42,14 +42,16 @@ final class BenchmarkSummaryWriter {
             grouped.computeIfAbsent(key, k -> new SummaryEntry(rr.getParams())).add(rr);
         }
 
-        StringBuilder sb = new StringBuilder(8192).append("[\n");
+        StringBuilder sb = new StringBuilder(8192).append("{\n");
+        env.appendJson(sb);
+        sb.append(",\n  \"results\": [\n");
         boolean first = true;
         for (SummaryEntry entry : grouped.values()) {
             if (!first) sb.append(",\n");
             first = false;
             entry.appendJson(sb);
         }
-        sb.append("\n]\n");
+        sb.append("\n  ]\n}\n");
 
         File file = new File(outputPath);
         file.getParentFile().mkdirs();

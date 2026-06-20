@@ -9,6 +9,7 @@ import com.simplj.flair.cache.store.DeleteListener;
 import com.simplj.flair.cache.store.PutListener;
 import com.simplj.flair.cache.transport.FrameHandler;
 import com.simplj.flair.cache.transport.TcpServer;
+import com.simplj.flair.cache.transport.TlsConfig;
 
 import java.util.List;
 import java.util.Objects;
@@ -68,6 +69,7 @@ public final class ReplicationEngine {
     private final TcpServer transport;
     private final GossipNode cluster;
     private final ConflictResolver conflictResolver;
+    private final TlsConfig tlsConfig;
     private final Function<String, CacheBlock<?, ?>> blockResolver;  // builder-provided lookup (may be null)
     private final ConcurrentHashMap<String, CacheBlock<?, ?>> attachedBlocks = new ConcurrentHashMap<>();
     private final long batchWindowMs;
@@ -98,6 +100,7 @@ public final class ReplicationEngine {
         this.transport        = b.transport;
         this.cluster          = b.cluster;
         this.conflictResolver = b.conflictResolver;
+        this.tlsConfig        = b.tlsConfig;
         this.blockResolver    = b.blockLookup;
         this.batchWindowMs          = b.batchWindowMs;
         this.batchMaxFrames         = b.batchMaxFrames;
@@ -125,6 +128,7 @@ public final class ReplicationEngine {
         // Pass the server's event loop so all outgoing connections share the single
         // flaircache-nio-selector thread rather than each spawning their own.
         peerRegistry = new PeerRegistry(localNodeId, transport.eventLoop(), ackTracker);
+        peerRegistry.setTlsConfig(tlsConfig);
         peerRegistry.onFramesDropped(framesDroppedSink);
         fanout = new ReplicationFanout(peerRegistry, cluster.members(), localNodeId,
                 batchWindowMs, batchMaxFrames);
@@ -198,12 +202,13 @@ public final class ReplicationEngine {
 
         attachedBlocks.put(blockName, block);
 
-        // PutListener: two guards prevent re-replication of incoming writes.
-        // INCOMING (ThreadLocal) is set by IncomingHandler around putRaw() calls.
-        // originNodeId is non-null for all wire-decoded entries (null → UUID(0,0) on wire).
-        // Both together are defense-in-depth; INCOMING is the primary, reliable guard.
+        // PutListener: INCOMING (ThreadLocal) prevents re-replication of writes that
+        // already arrived from a peer. IncomingHandler sets INCOMING=true around every
+        // putRaw() call; BootstrapSync uses ReplicationEngine.markIncoming(true) the same way.
+        // originNodeId is NO LONGER used as a secondary guard: locally-written entries now
+        // carry localNodeId (not null) so that LWW tiebreaking is consistent across all nodes.
         block.addPutListener((key, entry) -> {
-            if (INCOMING.get() || entry.originNodeId() != null) return;
+            if (INCOMING.get()) return;
             try {
                 CacheEntry outgoing = new CacheEntry(
                         entry.value(), entry.hlc(), entry.expiryEpochMs(), 0L, 0L, localNodeId);
@@ -366,7 +371,7 @@ public final class ReplicationEngine {
 
     IncomingHandler incomingHandler() { return incomingHandler; }
 
-    /** Returns the number of replication frames currently queued but not yet sent. */
+    /** Returns the number of replication frames currently queued in the fanout but not yet dispatched to peers. */
     public long pendingFrameCount() {
         ReplicationFanout f = fanout;
         return f != null ? f.queueSize() : 0L;
@@ -375,6 +380,35 @@ public final class ReplicationEngine {
     /** Returns the number of replication frames sent but not yet ACK'd by the required quorum. */
     public long pendingAckCount() {
         return ackTracker.pendingCount();
+    }
+
+    /**
+     * Returns the total number of frames sitting in per-peer write queues that have been
+     * dispatched by the fanout but not yet flushed to the underlying socket. Zero means all
+     * frames handed off by the fanout have been written to the OS TCP send buffer.
+     */
+    public long pendingWriteCount() {
+        PeerRegistry registry = peerRegistry;
+        return registry != null ? registry.pendingWriteCount() : 0L;
+    }
+
+    /**
+     * Returns the cumulative number of per-peer frame sends performed by the fanout: each
+     * frame fanned to N peers increments this by N. Used with {@link #totalFramesApplied()} to
+     * determine when all distributed frames have been applied cluster-wide.
+     */
+    public long totalFramesDistributed() {
+        ReplicationFanout f = fanout;
+        return f != null ? f.totalDistributed() : 0L;
+    }
+
+    /**
+     * Returns the cumulative number of PUT/DELETE frames that this node has received and
+     * successfully applied to a local block. Compared against the sum of
+     * {@link #totalFramesDistributed()} across all nodes to detect when replication is fully settled.
+     */
+    public long totalFramesApplied() {
+        return incomingHandler.totalApplied();
     }
 
     /** Initiate an outgoing connection to a peer. Used by bootstrap and tests. */
@@ -393,6 +427,7 @@ public final class ReplicationEngine {
         private GossipNode                        cluster;
         private ConflictResolver                  conflictResolver      = LWWResolver.INSTANCE;
         private Function<String, CacheBlock<?, ?>> blockLookup         = null;
+        private TlsConfig                         tlsConfig             = TlsConfig.disabled();
         private long                              batchWindowMs         = 2L;
         private int                               batchMaxFrames        = 64;
         private long                              ackTimeoutMs          = 500L;
@@ -429,6 +464,12 @@ public final class ReplicationEngine {
          */
         public Builder blockLookup(Function<String, CacheBlock<?, ?>> lookup) {
             this.blockLookup = Objects.requireNonNull(lookup, "blockLookup must not be null");
+            return this;
+        }
+
+        /** TLS configuration for outgoing peer connections. Default: disabled. */
+        public Builder tls(TlsConfig tls) {
+            this.tlsConfig = tls != null ? tls : TlsConfig.disabled();
             return this;
         }
 

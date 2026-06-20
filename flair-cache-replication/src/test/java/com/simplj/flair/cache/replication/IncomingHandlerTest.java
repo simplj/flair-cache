@@ -20,7 +20,9 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -413,6 +415,62 @@ class IncomingHandlerTest {
         assertDoesNotThrow(() -> handler.onFrame(cap, bad));
         assertEquals(1, cap.sent.size());
         assertEquals(FrameEncoder.TYPE_PONG, cap.sent.get(0).type());
+    }
+
+    // ── Bug-2 regression: TOCTOU race in handlePut (ConcurrentHashMap.compute vs getRaw+putRaw) ──
+    //
+    // Pre-fix, handlePut() did: getRaw(key) → resolve → putRaw(winner). Two worker threads racing
+    // on the same key can both see existing=null, both compute winner=their-own-entry, and the
+    // second writer blindly overwrites the first without going through LWW. The fix replaces that
+    // with putRawIfBetter() which wraps the entire read-modify-write in ConcurrentHashMap.compute(),
+    // serialising per-key conflict resolution.
+    //
+    // Test strategy: 500 rounds, each starting from an empty slot (block.clear()). In each round
+    // both entries compete simultaneously so both threads can see existing=null. Without compute(),
+    // LOW (HLC=1) overwrites HIGH (HLC=100) in roughly half of all rounds — virtually certain to
+    // fail at least once across 500 rounds. With compute(), HIGH always wins. Reverting
+    // IncomingHandler.handlePut() to the old getRaw+putRaw path makes this test fail.
+
+    @Test
+    void concurrent_put_low_hlc_cannot_overwrite_high_hlc() throws InterruptedException {
+        byte[] key = "race-key".getBytes();
+        UUID highNode = new UUID(1L, 0L);
+        UUID lowNode  = new UUID(0L, 1L);
+        CacheEntry high = new CacheEntry("HIGH".getBytes(), new HLCTimestamp(100L, 0L), 0, 0, 0, highNode);
+        CacheEntry low  = new CacheEntry("LOW".getBytes(),  new HLCTimestamp(1L, 0L),   0, 0, 0, lowNode);
+
+        int rounds = 500;
+        for (int round = 0; round < rounds; round++) {
+            // Fresh slot: both threads simultaneously see existing=null — maximises the race window.
+            block.clear();
+
+            CountDownLatch start = new CountDownLatch(1);
+            CountDownLatch done  = new CountDownLatch(2);
+            int frameBase = round * 2;
+
+            Thread tHigh = new Thread(() -> {
+                try { start.await(); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                handler.onFrame(noOp(), encodePut(frameBase,     false, "items", key, high));
+                done.countDown();
+            }, "test-high-" + round);
+
+            Thread tLow = new Thread(() -> {
+                try { start.await(); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                handler.onFrame(noOp(), encodePut(frameBase + 1, false, "items", key, low));
+                done.countDown();
+            }, "test-low-" + round);
+
+            tHigh.start();
+            tLow.start();
+            start.countDown();
+            assertTrue(done.await(10, TimeUnit.SECONDS), "round " + round + " timed out");
+
+            CacheEntry result = block.getRaw(key);
+            assertNotNull(result, "round " + round + ": key must exist after concurrent puts");
+            assertArrayEquals("HIGH".getBytes(), result.value(),
+                    "round " + round + ": LWW loser (LOW, HLC=1) overwrote winner (HIGH, HLC=100) "
+                    + "— TOCTOU race: both threads saw existing=null and the last writer won");
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

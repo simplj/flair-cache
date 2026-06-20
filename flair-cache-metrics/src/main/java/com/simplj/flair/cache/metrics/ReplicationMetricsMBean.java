@@ -8,6 +8,9 @@ public final class ReplicationMetricsMBean implements ReplicationMetricsMBeanInt
 
     private final LongSupplier pendingFramesSupplier;
     private final LongSupplier pendingAckSupplier;
+    private final LongSupplier pendingWriteSupplier;
+    private final LongSupplier totalDistributedSupplier;
+    private final LongSupplier totalAppliedSupplier;
     private final LongAdder droppedFrames = new LongAdder();
     private final LongAdder ackTimeouts   = new LongAdder();
     private final LongAdder bytesSent     = new LongAdder();
@@ -18,8 +21,22 @@ public final class ReplicationMetricsMBean implements ReplicationMetricsMBeanInt
 
     // Package-private: created via MetricsRegistry.withReplication(engine)
     ReplicationMetricsMBean(LongSupplier pendingFramesSupplier, LongSupplier pendingAckSupplier) {
-        this.pendingFramesSupplier = pendingFramesSupplier;
-        this.pendingAckSupplier    = pendingAckSupplier;
+        this(pendingFramesSupplier, pendingAckSupplier, () -> 0L, () -> 0L, () -> 0L);
+    }
+
+    ReplicationMetricsMBean(LongSupplier pendingFramesSupplier, LongSupplier pendingAckSupplier,
+                            LongSupplier pendingWriteSupplier) {
+        this(pendingFramesSupplier, pendingAckSupplier, pendingWriteSupplier, () -> 0L, () -> 0L);
+    }
+
+    ReplicationMetricsMBean(LongSupplier pendingFramesSupplier, LongSupplier pendingAckSupplier,
+                            LongSupplier pendingWriteSupplier, LongSupplier totalDistributedSupplier,
+                            LongSupplier totalAppliedSupplier) {
+        this.pendingFramesSupplier   = pendingFramesSupplier;
+        this.pendingAckSupplier      = pendingAckSupplier;
+        this.pendingWriteSupplier    = pendingWriteSupplier;
+        this.totalDistributedSupplier = totalDistributedSupplier;
+        this.totalAppliedSupplier    = totalAppliedSupplier;
     }
 
     public void recordDroppedFrame()            { droppedFrames.increment(); }
@@ -45,9 +62,12 @@ public final class ReplicationMetricsMBean implements ReplicationMetricsMBeanInt
         return count == 0 ? 0L : lagSumMs.sum() / count;
     }
     @Override public long getMaxReplicationLagMs() { return maxLagMs.get(); }
-    @Override public long getPendingFrameCount()   { return pendingFramesSupplier.getAsLong(); }
-    @Override public long getPendingAckCount()     { return pendingAckSupplier.getAsLong(); }
-    @Override public long getDroppedFrameCount()   { return droppedFrames.sum(); }
+    @Override public long getPendingFrameCount()       { return pendingFramesSupplier.getAsLong(); }
+    @Override public long getPendingAckCount()         { return pendingAckSupplier.getAsLong(); }
+    @Override public long getPendingWriteCount()       { return pendingWriteSupplier.getAsLong(); }
+    @Override public long getTotalFramesDistributed()  { return totalDistributedSupplier.getAsLong(); }
+    @Override public long getTotalFramesApplied()      { return totalAppliedSupplier.getAsLong(); }
+    @Override public long getDroppedFrameCount()       { return droppedFrames.sum(); }
     @Override public long getAckTimeoutCount()     { return ackTimeouts.sum(); }
     @Override public long getBytesSentTotal()      { return bytesSent.sum(); }
     @Override public long getBytesReceivedTotal()  { return bytesReceived.sum(); }

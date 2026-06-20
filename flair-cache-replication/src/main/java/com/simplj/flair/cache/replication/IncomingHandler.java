@@ -7,6 +7,7 @@ import com.simplj.flair.cache.transport.FrameHandler;
 import com.simplj.flair.cache.transport.RawFrame;
 
 import java.util.UUID;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
@@ -15,6 +16,10 @@ import java.util.logging.Logger;
 final class IncomingHandler implements FrameHandler {
 
     private static final Logger log = Logger.getLogger(IncomingHandler.class.getName());
+
+    // Total PUT/DELETE frames successfully applied to a local block. Compared against
+    // ReplicationFanout.totalDistributed to determine when all frames are applied cluster-wide.
+    private final LongAdder totalApplied = new LongAdder();
 
     private volatile ReplicationEngine engine;
 
@@ -49,25 +54,19 @@ final class IncomingHandler implements FrameHandler {
         if (lookup != null) {
             CacheBlock<?, ?> block = lookup.apply(decoded.blockName());
             if (block != null) {
-                // Always advance local HLC with the remote timestamp — even if the write loses.
-                block.updateClock(decoded.entry().hlc());
-                CacheEntry existing = block.getRaw(decoded.key());
-                CacheEntry winner;
-                if (existing == null) {
-                    winner = decoded.entry();
-                } else {
-                    winner = engine.conflictResolver().resolve(existing, decoded.entry());
-                }
-                // Write if there was no existing entry, or if the resolver chose not to keep existing.
-                // Mark the calling thread as performing an incoming apply so that the PutListener
-                // registered via attachBlock does not re-replicate the write back to peers.
-                if (existing == null || winner != existing) {
-                    ReplicationEngine.INCOMING.set(true);
-                    try {
-                        block.putRaw(decoded.key(), winner);
-                    } finally {
-                        ReplicationEngine.INCOMING.set(false);
-                    }
+                // Atomic LWW conflict resolution: ConcurrentHashMap.compute() serialises the
+                // read-modify-write on each key, eliminating the TOCTOU race where two incoming
+                // frames for the same key (from different peers) are dispatched to different
+                // worker threads and both see existing=null, causing both to overwrite each
+                // other without going through LWW. The HLC is advanced inside putRawIfBetter
+                // even when the incoming entry loses.
+                // INCOMING suppresses re-replication of this write via attachBlock PutListener.
+                ConflictResolver resolver = engine.conflictResolver();
+                ReplicationEngine.INCOMING.set(true);
+                try {
+                    block.putRawIfBetter(decoded.key(), decoded.entry(), resolver::resolve);
+                } finally {
+                    ReplicationEngine.INCOMING.set(false);
                 }
                 applied = true;
             }
@@ -83,6 +82,10 @@ final class IncomingHandler implements FrameHandler {
             } catch (Exception ex) {
                 log.log(Level.WARNING, "onIncoming callback threw", ex);
             }
+        }
+
+        if (applied) {
+            totalApplied.increment();
         }
 
         // Only ACK if the write was actually applied — a phantom ACK from a node that doesn't
@@ -143,6 +146,10 @@ final class IncomingHandler implements FrameHandler {
             }
         }
 
+        if (applied) {
+            totalApplied.increment();
+        }
+
         // Only ACK if the delete was actually applied — same reasoning as PUT.
         if (decoded.needsAck() && applied) {
             source.send(FrameEncoder.encodeAck(decoded.frameId()));
@@ -150,6 +157,10 @@ final class IncomingHandler implements FrameHandler {
                 log.finest("Sent ACK frameId=" + decoded.frameId());
             }
         }
+    }
+
+    long totalApplied() {
+        return totalApplied.sum();
     }
 
     private void handlePing(ReplicationEngine engine, Connection source) {

@@ -467,6 +467,7 @@ public final class FlairCache implements Closeable {
                 .ackTimeoutMs(config.ackTimeoutMs())
                 .keepaliveIntervalMs(config.keepaliveIntervalMs())
                 .keepalivePongTimeoutMs(config.keepalivePongTimeoutMs())
+                .tls(config.tls())
                 .blockLookup(blocks::get);
 
         FrameHandler replHandler = engineBuilder.frameHandler();
@@ -669,7 +670,11 @@ public final class FlairCache implements Closeable {
                     ? consistency
                     : cache.config.defaultConsistency();
 
-            // Create the store-level block with the shared HLC.
+            // Create the store-level block with the shared HLC and local node ID.
+            // localNodeId is propagated so locally-written entries carry a stable UUID for
+            // LWW tiebreaking — without it, concurrent writes from different nodes that share
+            // the same HLC timestamp would compare against UUID(0,0) on the writing node but
+            // the actual peer UUID on other nodes, causing inconsistent LWW resolution.
             CacheBlock<K, V> block = CacheBlock.<K, V>builder()
                     .name(name)
                     .keyCodec(keyCodec)
@@ -678,6 +683,7 @@ public final class FlairCache implements Closeable {
                     .eviction(eviction)
                     .maxEntries(maxEntries)
                     .hlc(cache.hlc)
+                    .localNodeId(cache.config.nodeId())
                     .build();
 
             // Wire watch listeners BEFORE making the block visible in the blocks map.
@@ -693,7 +699,7 @@ public final class FlairCache implements Closeable {
                 // Source determination: INCOMING flag takes priority over originNodeId.
                 //
                 // Source.LOCAL  — the calling thread invoked block.put() directly on this node,
-                //                 in this process. originNodeId is null for these writes.
+                //                 in this process. originNodeId equals localNodeId for these writes.
                 // Source.REPLICATED — the write arrived via the network: a peer's replication frame
                 //                 (IncomingHandler sets INCOMING=true) or a bootstrap snapshot
                 //                 (BootstrapSync.applyChunk sets INCOMING=true).

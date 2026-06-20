@@ -6,9 +6,11 @@ import com.simplj.flair.cache.hlc.HybridLogicalClock;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BiFunction;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -20,14 +22,17 @@ final class LocalStore {
 
     private static final Logger log = Logger.getLogger(LocalStore.class.getName());
 
-    private static final int  EVICTION_SAMPLE_SIZE       = 5;
-    static final long         LRU_UPDATE_GRANULARITY_MS  = 1_000L;
+    private static final int  EVICTION_SAMPLE_SIZE = 5;
 
     private final ConcurrentHashMap<ByteArrayKey, CacheEntry> store;
 
     private final HybridLogicalClock hlc;
     private final EvictionPolicy     policy;
     private final int                maxEntries; // 0 = unlimited
+    // Null in standalone mode (no replication). When set, locally-written entries (via put())
+    // are stamped with this node's UUID so LWW tiebreaking is consistent across all nodes:
+    // every node compares the same two UUIDs rather than one node comparing against UUID(0,0).
+    private final UUID               localNodeId;
     // CopyOnWriteArrayList: each list may race with the sweep thread (notifyExpire) or
     // with concurrent puts (notifyPut/notifyEvict) while addXxxListener() is called.
     private final List<PutListener>    putListeners    = new CopyOnWriteArrayList<>();
@@ -41,10 +46,15 @@ final class LocalStore {
     private final LongAdder expirations = new LongAdder();
 
     LocalStore(HybridLogicalClock hlc, EvictionPolicy policy, int maxEntries) {
-        this.store      = new ConcurrentHashMap<>();
-        this.hlc        = hlc;
-        this.policy     = policy;
-        this.maxEntries = maxEntries;
+        this(hlc, policy, maxEntries, null);
+    }
+
+    LocalStore(HybridLogicalClock hlc, EvictionPolicy policy, int maxEntries, UUID localNodeId) {
+        this.store       = new ConcurrentHashMap<>();
+        this.hlc         = hlc;
+        this.policy      = policy;
+        this.maxEntries  = maxEntries;
+        this.localNodeId = localNodeId;
     }
 
     void addPutListener(PutListener listener)       { putListeners.add(listener); }
@@ -57,7 +67,7 @@ final class LocalStore {
     void put(ByteArrayKey key, byte[] value, long expiryEpochMs) {
         HLCTimestamp ts  = hlc.now();
         long         now = System.currentTimeMillis();
-        CacheEntry entry = new CacheEntry(value, ts, expiryEpochMs, now, 0L, null);
+        CacheEntry entry = new CacheEntry(value, ts, expiryEpochMs, now, 0L, localNodeId);
         store.put(key, entry);
         notifyPut(key.data, entry); // notify BEFORE eviction: listeners see put → evict, not evict → put
         maybeEvict();
@@ -82,6 +92,43 @@ final class LocalStore {
         notifyPut(key, stamped);
     }
 
+    /**
+     * Atomically resolves a conflict and writes the winner. Used by the incoming replication
+     * handler where two frames for the same key may be processed concurrently by different
+     * worker threads. {@link ConcurrentHashMap#compute} serialises the read-modify-write on
+     * each individual key, so LWW is applied consistently without a separate lock.
+     *
+     * <p>The HLC is always advanced with the incoming timestamp, even when the existing entry
+     * wins. {@code notifyPut} is fired only when the incoming entry wins (a write actually occurred).
+     * Callers are responsible for setting the INCOMING ThreadLocal flag around this call so that
+     * PutListeners registered via the replication engine do not re-replicate the write.</p>
+     *
+     * @param resolver {@code (existing, incoming) → winner} — same contract as
+     *                 {@code ConflictResolver.resolve}; passed as a {@link BiFunction} to keep
+     *                 the store module free of replication types.
+     */
+    void putRawIfBetter(byte[] key, CacheEntry incoming,
+                        BiFunction<CacheEntry, CacheEntry, CacheEntry> resolver) {
+        hlc.update(incoming.hlc()); // always advance, even if incoming loses
+        ByteArrayKey bk = new ByteArrayKey(key);
+        CacheEntry[] written = {null};
+        store.compute(bk, (k, existing) -> {
+            CacheEntry winner = (existing == null) ? incoming : resolver.apply(existing, incoming);
+            if (winner == existing) return existing; // existing won — no change
+            long accessMs = existing != null ? existing.accessEpochMs() : System.currentTimeMillis();
+            long hitCount = existing != null ? existing.hitCount() : 0L;
+            CacheEntry stamped = new CacheEntry(
+                    winner.value(), winner.hlc(), winner.expiryEpochMs(),
+                    accessMs, hitCount, winner.originNodeId());
+            written[0] = stamped;
+            return stamped;
+        });
+        if (written[0] != null) {
+            notifyPut(key, written[0]);
+        }
+    }
+
+
     // ── Read path (hot — must be sub-200ns) ─────────────────────────────────
 
     /**
@@ -104,12 +151,10 @@ final class LocalStore {
             return null;
         }
         if (policy == EvictionPolicy.LRU || policy == EvictionPolicy.LFU) {
-            if (now - entry.accessEpochMs() > LRU_UPDATE_GRANULARITY_MS) {
-                // Best-effort CAS: if a concurrent write has already replaced this entry,
-                // replace() returns false and we skip — acceptable for LRU/LFU approximation.
-                // Using replace() instead of compute() keeps the allocation outside the bucket lock.
-                store.replace(key, entry, entry.withAccess(now));
-            }
+            // Best-effort CAS: if a concurrent write has already replaced this entry,
+            // replace() returns false and we skip — acceptable for LRU/LFU approximation.
+            // Using replace() instead of compute() keeps the allocation outside the bucket lock.
+            store.replace(key, entry, entry.withAccess(now));
         }
         hits.increment();
         return entry; // value bytes unchanged by access update — safe to return original

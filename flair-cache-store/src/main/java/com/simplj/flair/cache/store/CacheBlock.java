@@ -9,7 +9,9 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -45,7 +47,7 @@ public final class CacheBlock<K, V> implements AutoCloseable {
         this.ttlMs        = b.ttlMs;
 
         HybridLogicalClock hlc = b.hlc != null ? b.hlc : new HybridLogicalClock();
-        this.store = new LocalStore(hlc, b.eviction, b.maxEntries);
+        this.store = new LocalStore(hlc, b.eviction, b.maxEntries, b.localNodeId);
 
         if (b.userOnEvict != null) {
             BiConsumer<K, V> cb = b.userOnEvict;
@@ -168,6 +170,38 @@ public final class CacheBlock<K, V> implements AutoCloseable {
         store.putRaw(key, entry);
     }
 
+    /**
+     * <strong>Internal replication API — not for application use.</strong>
+     *
+     * <p>Intended caller: {@code IncomingHandler} in the replication module. This method is
+     * {@code public} only because the Java module system is not yet adopted; cross-package access
+     * between {@code flair-cache-replication} and {@code flair-cache-store} requires it. When
+     * {@code module-info.java} is introduced, this export will be restricted to
+     * {@code com.simplj.flair.cache.replication} and {@code com.simplj.flair.cache.bootstrap}.</p>
+     *
+     * <p><strong>Callers MUST set {@code ReplicationEngine.INCOMING = true} around this call.</strong>
+     * Omitting that flag causes every {@code PutListener} registered via the replication engine to
+     * re-replicate the incoming write back to peers, producing a replication storm. This is not
+     * self-enforcing — the burden is on the caller.</p>
+     *
+     * <p>Atomically resolves a conflict and writes the winner via
+     * {@link java.util.concurrent.ConcurrentHashMap#compute}, eliminating the TOCTOU race where
+     * two concurrent incoming frames for the same key could both see {@code existing == null} and
+     * overwrite each other without going through LWW. The HLC is advanced with the incoming
+     * timestamp regardless of which entry wins. {@code notifyPut} fires only when the incoming
+     * entry wins (a write actually occurred).</p>
+     *
+     * @param resolver {@code (existing, incoming) → winner} — the conflict resolver to apply;
+     *                 passed as a {@link BiFunction} to keep this module free of replication types.
+     */
+    public void putRawIfBetter(byte[] key, CacheEntry incoming,
+                               BiFunction<CacheEntry, CacheEntry, CacheEntry> resolver) {
+        Objects.requireNonNull(key,      "key must not be null");
+        Objects.requireNonNull(incoming, "incoming must not be null");
+        Objects.requireNonNull(resolver, "resolver must not be null");
+        store.putRawIfBetter(key, incoming, resolver);
+    }
+
     public CacheEntry getRaw(byte[] key) {
         Objects.requireNonNull(key, "key must not be null");
         return store.getRaw(key);
@@ -270,6 +304,7 @@ public final class CacheBlock<K, V> implements AutoCloseable {
         private BiConsumer<K, V>   userOnEvict;
         private long               sweepIntervalMs = ExpiryManager.DEFAULT_SWEEP_INTERVAL_MS;
         private HybridLogicalClock hlc;
+        private UUID               localNodeId;
 
         private Builder() {}
 
@@ -320,6 +355,18 @@ public final class CacheBlock<K, V> implements AutoCloseable {
         /** Inject a shared HLC (e.g. from the full FlairCache instance). */
         public Builder<K, V> hlc(HybridLogicalClock hlc) {
             this.hlc = hlc;
+            return this;
+        }
+
+        /**
+         * Sets the local node UUID so that locally-written entries carry a stable identity
+         * for LWW tiebreaking. When set, concurrent writes from different nodes that share
+         * the same HLC timestamp will resolve consistently on all nodes via UUID comparison
+         * rather than falling back to {@code UUID(0,0)} for the locally-written entry.
+         * Optional — standalone (non-replicated) stores leave this null.
+         */
+        public Builder<K, V> localNodeId(UUID nodeId) {
+            this.localNodeId = nodeId;
             return this;
         }
 

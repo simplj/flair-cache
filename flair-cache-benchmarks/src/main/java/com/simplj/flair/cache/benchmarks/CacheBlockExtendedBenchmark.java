@@ -129,7 +129,7 @@ public class CacheBlockExtendedBenchmark {
 
     /**
      * Point-in-time copy of all 10k entries with full deserialization.
-     * Measures: {@code StampedLock} read lock + HashMap copy + 10k deserialize calls.
+     * Measures: {@code ConcurrentHashMap} bulk copy (via constructor) + 10k decode calls.
      */
     @Benchmark
     public Map<String, String> snapshotTenK() {
@@ -164,5 +164,21 @@ public class CacheBlockExtendedBenchmark {
         // Keys cycle through 100k unique strings; the LRU store holds 1k at most.
         // Each put of a not-recently-seen key is a guaranteed new insert → eviction.
         blockLru.put("new-" + (c.i++ % 100_000), "value");
+    }
+
+    /**
+     * Get hit with LRU eviction enabled.
+     *
+     * <p>Unlike {@code LocalStoreBenchmark.getHit} (which uses a block with no eviction policy
+     * and therefore pays zero access-tracking cost), this benchmark measures the full LRU
+     * read path: ConcurrentHashMap lookup + CacheEntry allocation via {@code withAccess()} +
+     * CAS {@code replace()} to update the entry's access timestamp and hit count.
+     *
+     * <p>Run this alongside {@code LocalStoreBenchmark.getHit} to isolate the incremental cost
+     * of accurate LRU tracking. The delta is the price of LRU actually meaning LRU.
+     */
+    @Benchmark
+    public String getHitLru() {
+        return blockLru.get("pre-500");
     }
 }
