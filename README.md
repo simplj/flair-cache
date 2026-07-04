@@ -42,12 +42,14 @@ Service A          Service B          Service C
 | Zero dependencies | ❌ No | ❌ No | ❌ No | ❌ No | **✅ Yes — JDK only** |
 | Query DSL (join, aggregate) | ❌ No | ⚠️ Limited | ❌ No | ❌ No | **✅ Yes** |
 | Disk persistence | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ V1 no |
-| JCache (JSR-107) compliant | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ Intentional |
+| JCache (JSR-107) compliant | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ Intentional³ |
 | Setup effort | High | High | Low–High² | Low | **Zero** |
 
 ¹ EhCache is local-only in standalone mode. Distribution requires Terracotta — a separate server process with enterprise licensing implications, making it architecturally similar to Redis for reads.
 
 ² EhCache standalone setup is low effort. EhCache + Terracotta setup is high effort.
+
+³ JSR-107 (`javax.cache`) is itself an external dependency — adopting it would break FLAIR's zero-dependency rule. More fundamentally, the spec models a single-node, synchronous `Cache<K,V>` with no concept of replication, peer topology, or tunable consistency — it has no way to express `EVENTUAL`/`QUORUM`/`STRONG`. Conforming to it would mean either silently hiding FLAIR's distributed semantics behind an interface that can't represent them, or leaking FLAIR-specific behavior through a spec contract not designed for it. FLAIR skips JCache compliance by design rather than bolt on a leaky adapter.
 
 ---
 
