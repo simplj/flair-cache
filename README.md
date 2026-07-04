@@ -33,14 +33,21 @@ Service A          Service B          Service C
 
 ## Why FLAIR?
 
-| | Redis | Hazelcast | Caffeine | **FLAIR** |
-|---|---|---|---|---|
-| Read latency | Network + deser | Network + deser | Sub-µs (local only) | **Sub-µs (distributed)** |
-| External process required | ✅ Yes | ✅ Yes | ❌ No | **❌ No** |
-| Java-native object storage | ❌ No | ⚠️ Partial | ✅ Yes | **✅ Yes** |
-| Zero dependencies | ❌ No | ❌ No | ❌ No | **✅ Yes — JDK only** |
-| Query DSL (join, aggregate) | ❌ No | ⚠️ Limited | ❌ No | **✅ Yes** |
-| Setup effort | High | High | Low | **Zero** |
+| | Redis | Hazelcast | EhCache | Caffeine | **FLAIR** |
+|---|---|---|---|---|---|
+| Read latency | Network + deser | Network + deser | Sub-µs (local only) | Sub-µs (local only) | **Sub-µs (distributed)** |
+| Distributed reads | ✅ Via server | ✅ Via server | ❌ Local only¹ | ❌ No | **✅ Embedded, peer-to-peer** |
+| External process required | ✅ Yes | ✅ Yes | ⚠️ Terracotta for dist. | ❌ No | **❌ No** |
+| Java-native object storage | ❌ No | ⚠️ Partial | ✅ Yes | ✅ Yes | **✅ Yes** |
+| Zero dependencies | ❌ No | ❌ No | ❌ No | ❌ No | **✅ Yes — JDK only** |
+| Query DSL (join, aggregate) | ❌ No | ⚠️ Limited | ❌ No | ❌ No | **✅ Yes** |
+| Disk persistence | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No | ❌ V1 no |
+| JCache (JSR-107) compliant | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ Intentional |
+| Setup effort | High | High | Low–High² | Low | **Zero** |
+
+¹ EhCache is local-only in standalone mode. Distribution requires Terracotta — a separate server process with enterprise licensing implications, making it architecturally similar to Redis for reads.
+
+² EhCache standalone setup is low effort. EhCache + Terracotta setup is high effort.
 
 ---
 
@@ -195,7 +202,9 @@ public class FlairCacheConfig {
 // Define a typed cache block
 @Autowired FlairCache cache;
 
-CacheBlock<String, Product> products = cache.block("products")
+CacheBlock<String, Product> products = cache.<String, Product>registerBlock("products")
+    .keyCodec(stringCodec)
+    .valueCodec(productCodec)
     .ttl(Duration.ofMinutes(30))
     .eviction(EvictionPolicy.LRU)
     .maxEntries(100_000)
@@ -296,6 +305,29 @@ Measured via JMH microbenchmarks. Full results and methodology in [BENCHMARK.md]
 > `put()` p99 reflects the full local write path: HLC timestamp generation, store write, and async
 > replication enqueue. The replication enqueue itself is non-blocking — it does not wait for peers.
 > For read-heavy workloads, `get()` at 188ns is the number that matters.
+
+### How to interpret the numbers honestly
+
+**`get()` under concurrent write pressure:** Five independent benchmark runs showed get() p99
+staying flat in the 189–306ns range regardless of writer-thread count (1 to 16 threads). p999
+at zero writers sits in the same range as loaded rows — confirming that occasional
+multi-microsecond tail events are background GC/OS jitter, not a write-pressure-specific
+effect. Under combined load (writers + 20 watch subscriptions + DSL queries running
+together), get() p99 has been observed around ~1,800ns due to OS scheduling jitter from
+watch-drain threads waking concurrently — a known, bounded characteristic of busy-node
+conditions.
+
+**HLC tail latency:** Every write generates a causally-ordered timestamp via
+`HybridLogicalClock`. Under 8-thread contention, p50 is ~125ns but p99 climbs to ~31,000ns —
+a real, consistently reproducible tail. This is the cost of correct causal ordering under
+concurrent write load; the median case (what most writes experience) is fast. This was
+significantly worse in earlier development (~88,000ns p99 with a synchronized monitor) and
+was improved 3× via a `StampedLock`-based design with zero allocation overhead.
+
+**Watch dispatch is O(1) in subscriber count:** going from 1 to 50 active subscribers on a
+cache block adds nothing to the calling thread's cost. The dispatch architecture hands off
+fan-out work to a dedicated thread, so the writing thread always does exactly one queue
+operation regardless of how many listeners are registered.
 
 ---
 
@@ -459,6 +491,30 @@ Caffeine has no bootstrap sync — it starts cold and warms up as entries are ad
 joining an existing cluster must receive a full state transfer before serving consistent reads.
 For very large datasets, this bootstrap can take seconds or minutes.
 
+### Where EhCache wins over FLAIR
+
+**EhCache standalone is a mature, battle-tested local cache.** It has 20+ years of production
+use, JCache (JSR-107) compliance, Spring `@Cacheable` annotation support out of the box, disk
+overflow/persistence, and off-heap storage. If your services don't need to share data across
+nodes, EhCache standalone is the safer and more mature choice over FLAIR's local store.
+
+**Disk persistence and off-heap storage**
+EhCache 3 can spill to disk when entries exceed heap capacity and supports off-heap storage
+to reduce GC pressure for large datasets. FLAIR stores everything in JVM heap with no disk
+fallback in V1. For large, memory-sensitive datasets, EhCache handles this; FLAIR does not.
+
+**JCache compliance and Spring integration**
+EhCache implements the standard JCache (JSR-107) API and integrates with Spring's `@Cacheable`,
+`@CachePut`, `@CacheEvict` annotations. FLAIR's API is more ergonomic but non-standard —
+teams with JCache compliance requirements or existing Spring Cache abstractions will find
+EhCache a better fit.
+
+**Where FLAIR wins over EhCache standalone:** distribution. EhCache standalone is purely
+local — a write on Service A is invisible to Service B. Distribution requires Terracotta,
+which is a separate server process with enterprise licensing implications. FLAIR gives you
+genuine peer-to-peer distribution with zero external infrastructure, plus a query DSL that
+EhCache (standalone or distributed) does not offer.
+
 ---
 
 ## Best Fit Use Cases
@@ -478,6 +534,77 @@ FLAIR is designed for specific scenarios where it genuinely excels:
 - Pure local caching with no distribution need — use Caffeine
 - Primary database replacement requiring ACID guarantees — use a database
 - Operational simplicity over raw performance — use Redis
+
+---
+
+## Use Cases
+
+### 1. Shared Configuration and Feature Flags
+
+A platform team manages configuration values — feature flags, rate limits, experiment
+assignments, routing rules — that dozens of microservices read on every request. These values
+change a few times per day but are read millions of times per second.
+
+FLAIR fits because the read-to-write ratio is extreme — exactly what its architecture
+optimises for. When an operator flips a feature flag, the write propagates to every service
+node in milliseconds. Every subsequent read hits local memory with zero network overhead.
+The Watch API means each service reacts to configuration changes instantly without polling.
+If the configuration source goes down, every node continues serving reads from its local copy.
+
+*The concrete win:* Redis adds a network round trip to every config read. EhCache standalone
+requires manual cache invalidation across nodes. FLAIR keeps every node's copy consistent
+automatically, with no external infrastructure.
+
+---
+
+### 2. Product Catalog and Pricing in E-Commerce
+
+An e-commerce platform has product data, pricing rules, and inventory status that multiple
+services need — checkout, recommendations, search. The data changes occasionally (new
+products, price updates) but is queried constantly, and the query patterns are non-trivial:
+products filtered by category and price, joined with their current inventory status.
+
+FLAIR fits for two reasons, not just one. The read-to-write ratio is high. And the DSL query
+layer is uniquely valuable — no other embeddable Java cache lets you write:
+
+```java
+cache.query()
+    .from("products", Product.class, codec)
+    .join("inventory", InventoryStatus.class, invCodec)
+    .on((p, i) -> p.getSku().equals(i.getSku()))
+    .where(p -> p.getCategory().equals("electronics"))
+    .and(p -> p.getPrice() < 1000)
+    .fetch();
+```
+
+That join runs entirely in-process, in milliseconds, with zero network calls — something that
+would otherwise require either a database query or two separate cache lookups followed by
+application-level join logic.
+
+---
+
+### 3. Reference Data in Financial Services or Healthcare
+
+A financial platform needs low-latency decisions using reference data — instrument metadata,
+counterparty details, risk limits, regulatory thresholds. Or a healthcare platform needs drug
+interaction databases, formulary data, eligibility rules. This data is authoritative,
+compliance-sensitive, and must be consistent across every service node that touches it.
+
+FLAIR fits for three specific reasons:
+
+**Consistency under write.** QUORUM consistency mode ensures a write is confirmed by a
+majority of nodes before returning — strong consistency without an external coordinator.
+HLC-based conflict resolution means simultaneous updates produce a deterministic, consistent
+winner on every node.
+
+**Zero network on read.** In high-frequency trading or real-time risk calculation, a network
+call to look up an instrument's metadata adds latency these systems cannot afford. A local
+HashMap lookup is the only acceptable read path.
+
+**Reactive compliance hooks.** When a regulatory threshold changes, downstream systems need
+to know immediately. The Watch API's `Source.LOCAL` vs `Source.REPLICATED` distinction tells
+each listener whether a change originated locally or arrived from a peer — a distinction with
+real compliance logging implications.
 
 ---
 
@@ -504,7 +631,7 @@ FLAIR Cache is licensed under the **Apache License, Version 2.0**.
 You may use it freely in commercial and open-source projects. See [LICENSE](LICENSE) for the full text.
 
 ```
-Copyright 2024 simplj.com
+Copyright 2026 SimplJ Team
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

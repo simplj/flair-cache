@@ -12,7 +12,7 @@
     <name>FlairCache Parent</name>
     <description>Fast Local Access with In-memory Replication — parent POM for all FlairCache modules</description>
     <url>https://github.com/simplj/flair-cache</url>
-    <inceptionYear>2024</inceptionYear>
+    <inceptionYear>2026</inceptionYear>
 
     <licenses>
         <license>

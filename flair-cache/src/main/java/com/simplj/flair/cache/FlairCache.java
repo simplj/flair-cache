@@ -572,6 +572,11 @@ public final class FlairCache implements Closeable {
 
     // ── Factory ───────────────────────────────────────────────────────────────
 
+    /**
+     * Returns a fluent builder for constructing a {@link FlairCache} instance.
+     * Configure bind port, seed peers, consistency mode, TLS, and tuning parameters,
+     * then call {@link FlairCacheBuilder#build()} followed by {@link #start()}.
+     */
     public static FlairCacheBuilder builder() {
         return new FlairCacheBuilder();
     }
@@ -600,16 +605,25 @@ public final class FlairCache implements Closeable {
             this.cache = cache;
         }
 
+        /** Sets the codec used to serialize and deserialize cache keys. Required before {@link #build()}. */
         public BlockBuilder<K, V> keyCodec(Codec<K> codec) {
             this.keyCodec = Objects.requireNonNull(codec, "keyCodec must not be null");
             return this;
         }
 
+        /** Sets the codec used to serialize and deserialize cache values. Required before {@link #build()}. */
         public BlockBuilder<K, V> valueCodec(Codec<V> codec) {
             this.valueCodec = Objects.requireNonNull(codec, "valueCodec must not be null");
             return this;
         }
 
+        /**
+         * Sets the time-to-live for entries in this block. Entries are expired lazily on access
+         * and eagerly by the background sweep thread. {@code Duration.ZERO} (the default) means
+         * no TTL — entries never expire by time alone.
+         *
+         * @throws IllegalArgumentException if {@code ttl} is negative
+         */
         public BlockBuilder<K, V> ttl(Duration ttl) {
             Objects.requireNonNull(ttl, "ttl must not be null");
             if (ttl.isNegative()) throw new IllegalArgumentException("ttl must not be negative");
@@ -617,6 +631,11 @@ public final class FlairCache implements Closeable {
             return this;
         }
 
+        /**
+         * Sets the eviction policy applied when the block's entry count reaches {@link #maxEntries}.
+         * Defaults to {@link EvictionPolicy#NONE} — no eviction. Has no effect unless
+         * {@link #maxEntries(int)} is also set to a positive value.
+         */
         public BlockBuilder<K, V> eviction(EvictionPolicy eviction) {
             this.eviction = Objects.requireNonNull(eviction, "eviction must not be null");
             return this;

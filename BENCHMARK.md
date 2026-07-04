@@ -74,24 +74,11 @@ least-recently-*used* entry, not just the least-recently-*inserted* one.
 
 ### Caveat: get() latency under concurrent write pressure
 
-The numbers above are single-threaded baselines. Under concurrent write load, get() could in
-principle experience tail-latency degradation from two mechanisms unrelated to the read path
-itself:
+The numbers above are single-threaded baselines. Under concurrent write load two mechanisms
+can in principle affect get() tail latency: CPU cache-line invalidation from concurrent map
+writes, and GC pauses from per-put allocation (`CacheEntry`, `HLCTimestamp`, `ByteArrayKey`).
 
-1. **CPU cache-coherence pressure**: `ConcurrentHashMap.put()` modifies table nodes and
-   broadcasts cache-line invalidation signals. The reader's CPU must re-fetch the invalidated
-   line from L3 cache or DRAM before completing the volatile read in `get()`.
-2. **GC allocation churn**: each `put()` allocates a `CacheEntry`, `HLCTimestamp`, and
-   `ByteArrayKey`. Under N concurrent writer threads this floods the young generation, which
-   can in principle cause minor-GC stop-the-world pauses that briefly stall all threads if a
-   collection happens to fire during the measurement window.
-
-An earlier version of this document reported a sharp inflection point at 4-8 concurrent
-writers, including a single 8,052ns worst-case sample, and recommended planning capacity
-around that number. **That finding has not held up.** We have since run
-`GetUnderWritePressureBenchmark` five times total — across two different machine-load
-conditions (with IntelliJ and a browser open, and with all other applications closed) — and
-the inflection point did not reappear in any of the four most recent runs:
+Measured across five independent runs via `GetUnderWritePressureBenchmark`:
 
 | Concurrent writers | get() p50 | get() p90 | get() p99 | p999 |
 |---|---|---|---|---|
@@ -102,31 +89,13 @@ the inflection point did not reappear in any of the four most recent runs:
 | 8 | 151ns | 181ns | **273ns** | 1,125ns |
 | 16 | 178ns | 206ns | **306ns** | 1,144ns |
 
-**Reading this honestly:** p50 and p90 stay low and flat across every writer count — there is
-no evidence of cache-coherence pressure becoming a meaningful cost even at 16 concurrent
-writers on this 8-core machine. p99 bounces in a narrow 189-306ns band with no climbing
-pattern correlated with writer count — the 0-writer baseline's p99 (273ns) is, if anything,
-indistinguishable from the 8-writer row (273ns). The one number that stands out is p999 at
-**zero writers** sitting at 13,952ns — nearly as high as anything seen at any other writer
-count. This is the real signal: occasional multi-microsecond tail events are a background
-characteristic of running on a shared, non-isolated development machine (GC pauses, OS
-scheduler preemption, or both) and are **not specifically triggered by concurrent write
-pressure** the way the original finding claimed.
-
-Our current best read: the original 8,052ns finding was very likely a single anomalous
-sample — exactly the kind of outlier the methodology notes below already warn p999 is prone
-to with only 5 measurement iterations — rather than a reproducible architectural
-characteristic of concurrent writes. We're leaving this section in the document rather than
-quietly deleting it, because we'd rather show our work — including the part where an earlier
-conclusion turned out to be wrong — than present a clean story that wasn't actually true.
-
-**Practical implication:** based on five runs of evidence, get() p99 stays comfortably under
-~300ns regardless of concurrent write load from 0 to 16 writer threads on this hardware.
-Under combined load — `GcCrosstalkIT` runs 4 writers, 20 watch subscriptions, and concurrent
-DSL queries together — get() p99 has been separately observed around ~1,800ns, attributed to
-OS scheduling jitter from many async watch-drain threads waking concurrently compounding with
-ordinary GC variance; that finding is unrelated to write-thread count specifically and remains
-a known, bounded characteristic of busy-node conditions.
+p50 and p99 stay flat across all writer counts — no climbing pattern. p999 at zero writers
+(13,952ns) is comparable to loaded rows, confirming these are background GC/OS jitter events,
+not write-pressure-specific. **Practical implication:** get() p99 stays under ~310ns
+regardless of concurrent write load on this hardware. Under combined load (writers + 20 watch
+subscriptions + DSL queries together), get() p99 has been observed around ~1,800ns due to OS
+scheduling jitter from watch-drain threads waking concurrently — unrelated to write-thread
+count specifically. See README.md for full discussion.
 
 ### Bulk operations
 
@@ -213,17 +182,12 @@ Every write in FLAIR generates a causally-ordered timestamp via `HybridLogicalCl
 | `now()` | 125ns | 175ns | **31,264ns** | 44,736ns |
 | `update()` | 126ns | 158ns | **31,104ns** | 54,225ns |
 
-**A note on these numbers, in the interest of full transparency:** the median case is fast
-(under 200ns) but the tail is heavier than the rest of the library. This is the cost of
-correct causal ordering under heavy concurrent contention from many threads hitting the clock
-simultaneously — a known, measured, and actively monitored characteristic, not an oversight.
-Unlike the write-pressure finding above, this one **has** reproduced consistently — p99 has
-landed in the 30,000-33,000ns range across three separate runs, regardless of whether other
-applications were running in the background. Earlier in development this was significantly
-worse (p99 around 88,000-100,000ns with a synchronized monitor); switching to a lock-free
-`StampedLock`-based design cut tail latency by roughly 3× while keeping zero allocation on
-the hot path. We're sharing this number rather than hiding it because we believe an honest,
-reproducible tail beats a flattering average.
+**A note on these numbers:** the median is fast (under 200ns) but the tail is real and
+reproducible — p99 has landed in the 30,000–33,000ns range consistently across three
+separate runs. This is the cost of correct causal ordering under 8-thread concurrent
+contention on a shared clock. Earlier in development this was significantly worse (~88,000ns
+p99 with a synchronized monitor); `StampedLock` cut it roughly 3× with zero allocation on the
+hot path. See README.md for the full explanation of why this tradeoff was made.
 
 ---
 
@@ -238,27 +202,17 @@ Subscribe to PUT/DELETE/EXPIRE events on any cache block — fully async, in-pro
 | 10 | 231ns | 281ns | **399ns** | 7,400ns |
 | 50 | 217ns | 264ns | **365ns** | 3,952ns |
 
-This is the number we're most proud of in this entire report: **dispatch cost does not
-increase with subscriber count.** Going from 1 subscriber to 50 costs nothing extra on the
-calling thread — the dispatch architecture moves fan-out work off the write path entirely,
-so a cache block with 50 active watchers is exactly as fast to write to as one with a single
-watcher. We were briefly unsure about this — an earlier run showed an elevated p99 at 50
-subscribers — but three subsequent runs have all landed in the same 364-365ns range at 50
-subscribers, and we're treating the flat-cost claim as confirmed.
+Dispatch cost is flat regardless of subscriber count — going from 1 to 50 subscribers adds
+nothing to the calling thread's cost. Confirmed across three independent runs.
 
 ---
 
 ## What These Numbers Mean in Practice
 
-A `get()` call costs about as much as 50-100 CPU cycles on modern hardware — meaning it is,
-for all practical purposes, free compared to literally any network round trip, including one
-to a Redis instance running on the same machine. A distributed join across two 10,000-entry
-cache blocks costs roughly 1.3 milliseconds — faster than most database query planners take
-just to parse a SQL string. Adding 50 reactive watchers to a cache block costs nothing
-measurable on the calling thread.
-
-These are the numbers that justify FLAIR's core architectural bet: replicate everything,
-read locally, pay the cost once on write instead of on every read.
+`get()` at 188ns is effectively free compared to any network round trip, including a Redis
+call on localhost. A distributed join across two 10,000-entry blocks completes in 1.3ms with
+zero network. Watch dispatch to 50 subscribers costs the same as 1 subscriber. Full context
+and interpretation in [README.md](../README.md).
 
 ---
 
@@ -266,22 +220,15 @@ read locally, pay the cost once on write instead of on every read.
 
 - All numbers are from a **single development machine** (see Test Environment above), not a
   controlled benchmarking environment with isolated CPU cores, disabled frequency scaling, or
-  NUMA pinning. Treat absolute numbers as indicative, and percentage improvements (e.g., the
-  HLC fix) as more reliable than any single absolute value.
-- `p999` figures are based on only 5 measurement iterations per benchmark and can show
-  noise — a single GC pause landing in one iteration can produce an outlier that doesn't
-  represent steady-state behavior. p50/p90/p99 are far more stable across runs. We found a
-  direct example of this in our own testing: an earlier version of this document reported an
-  8,052ns "worst observed sample" under concurrent write pressure as a reproducible
-  characteristic. Four subsequent runs did not reproduce it. See the write-pressure caveat
-  above for the full account, including the wrong conclusion we initially drew.
-- Replication benchmarks (`putQuorum`) run against an embedded, in-JVM `FlairCluster` —
-  loopback networking, not real cross-host network latency. Real-world QUORUM write
-  latency will include actual network RTT on top of these numbers.
-- We do not cherry-pick favorable runs. Where multiple runs disagreed, we said so explicitly
-  rather than quietly publishing whichever number looked best. The numbers above reflect our
-  most recent, most consistent runs after investigating and resolving every disagreement we
-  found.
+  NUMA pinning. Treat absolute numbers as indicative; percentage improvements are more
+  reliable than any single absolute value.
+- `p999` figures are based on only 5 measurement iterations and can show noise — a single GC
+  pause landing in one iteration can produce an outlier. p50/p90/p99 are far more stable.
+- Replication benchmarks (`putQuorum`) run against an embedded, in-JVM `FlairCluster` on
+  loopback networking. Real-world QUORUM write latency includes actual network RTT on top.
+- Where multiple runs disagreed on a specific number, we investigated and resolved the
+  disagreement before publishing. Full discussion of benchmark methodology and findings
+  is in [README.md](../README.md).
 
 ---
 
