@@ -65,7 +65,7 @@
         <!-- Change ONLY this property to bump all modules at once.          -->
         <!-- flatten-maven-plugin resolves it before install/deploy so       -->
         <!-- published POMs always contain the concrete version string.      -->
-        <revision>0.1</revision>
+        <revision>0.2</revision>
 
         <!-- JDK 17 compile + target -->
         <java.version>17</java.version>
