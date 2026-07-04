@@ -7,8 +7,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-17%2B-orange.svg)](https://openjdk.org/)
 [![Status](https://img.shields.io/badge/Status-V1%20Complete-brightgreen.svg)]()
-[![Maven Central](https://img.shields.io/maven-central/v/com.simplj.lambda/jlx.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:%22com.simplj.lambda%22%20AND%20a:%22jlx%22)
-[![javadoc](https://javadoc.io/badge2/com.simplj.lambda/jlx/javadoc.svg)](https://javadoc.io/doc/com.simplj.lambda/jlx)
+[![Maven Central](https://img.shields.io/maven-central/v/com.simplj.lambda/jlx.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:%22com.simplj.flair%22%20AND%20a:%22flair-cache%22)
+[![javadoc](https://javadoc.io/badge2/com.simplj.flair/flair-cache/javadoc.svg)](https://javadoc.io/doc/com.simplj.flair/flair-cache)
 
 ---
 
